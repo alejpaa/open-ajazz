@@ -34,7 +34,7 @@ class MouseProtocolService {
   private targetReportId: number = 0;
 
   /**
-   * Conecta con el dispositivo USB HID buscando específicamente la interfaz Vendor (UsagePage 0xFFFF / 65535)
+   * Conecta con el dispositivo USB HID buscando estrictamente la interfaz Vendor (UsagePage 0xFFFF / 65535)
    */
   async connect(): Promise<boolean> {
     if (this.isTauri) {
@@ -45,50 +45,61 @@ class MouseProtocolService {
     if (typeof navigator !== 'undefined' && 'hid' in navigator) {
       try {
         logger.info(`Solicitando dispositivo USB HID (${VID_AJAZZ.toString(16)}:${PID_AJAZZ_APEX.toString(16)})...`);
-        const devices = await (navigator as any).hid.requestDevice({
-          filters: [{ vendorId: VID_AJAZZ, productId: PID_AJAZZ_APEX }]
+
+        // 1. Obtener dispositivos ya autorizados o solicitar uno nuevo
+        let allDevices: any[] = await (navigator as any).hid.getDevices();
+        allDevices = allDevices.filter(
+          (d) => d.vendorId === VID_AJAZZ && d.productId === PID_AJAZZ_APEX
+        );
+
+        if (allDevices.length === 0) {
+          const requested = await (navigator as any).hid.requestDevice({
+            filters: [{ vendorId: VID_AJAZZ, productId: PID_AJAZZ_APEX }]
+          });
+          if (!requested || requested.length === 0) {
+            logger.warn('El usuario canceló la selección de dispositivo USB.');
+            throw new Error('No se seleccionó ningún dispositivo USB.');
+          }
+          allDevices = await (navigator as any).hid.getDevices();
+        }
+
+        logger.info(`Se detectaron ${allDevices.length} interfaces autorizadas para el mouse.`);
+
+        // 2. Imprimir diagnósticos de cada colección para depuración
+        allDevices.forEach((d, idx) => {
+          const colInfo = d.collections?.map((c: any) =>
+            `UsagePage=0x${c.usagePage.toString(16)} (${c.usagePage}), Usage=${c.usage}, Features=${c.featureReports?.length || 0}`
+          ).join(' | ');
+          logger.info(`[Interfaz ${idx}] ${d.productName || 'HID'} -> ${colInfo}`);
         });
 
-        if (!devices || devices.length === 0) {
-          logger.warn('El usuario canceló la selección de dispositivo USB.');
-          throw new Error('No se seleccionó ningún dispositivo USB.');
+        // 3. Seleccionar ESTRÍCTAMENTE la interfaz Vendor: UsagePage 0xFFFF (65535) o 0xFF00
+        let targetDevice = allDevices.find((d) =>
+          d.collections?.some((c: any) => c.usagePage === 65535 || c.usagePage === 0xffff || (c.usagePage >= 0xff00 && c.usagePage <= 0xffff))
+        );
+
+        // Si no se encuentra con 65535 estricto, buscar la que tenga featureReports de 64 bytes
+        if (!targetDevice) {
+          targetDevice = allDevices.find((d) =>
+            d.collections?.some((c: any) => c.featureReports && c.featureReports.length > 0 && c.usagePage !== 1 && c.usagePage !== 12)
+          );
         }
 
-        logger.info(`Se encontraron ${devices.length} interfaces/colecciones.`);
-
-        let selectedDevice: any = null;
-
-        for (let i = 0; i < devices.length; i++) {
-          const d = devices[i];
-          const hasVendor = d.collections?.some((c: any) => {
-            const isVendor = c.usagePage === 65535 || c.usagePage === 0xff00 || (c.usagePage >= 0xff00 && c.usagePage <= 0xffff);
-            const hasFeature = c.featureReports && c.featureReports.length > 0;
-            return isVendor || hasFeature;
-          });
-
-          if (hasVendor) {
-            selectedDevice = d;
-            logger.info(`Interfaz Vendor identificada en colección [${i}].`);
-            break;
-          }
+        if (!targetDevice) {
+          // Último recurso: usar el primer dispositivo
+          targetDevice = allDevices[0];
+          logger.warn('No se encontró UsagePage 65535 explícito, usando interfaz fallback.');
         }
 
-        if (!selectedDevice) {
-          selectedDevice = devices.find((d: any) =>
-            d.collections?.some((c: any) => c.featureReports && c.featureReports.length > 0)
-          ) || devices[0];
-          logger.warn('No se detectó UsagePage 65535 exacto, usando primera colección con Feature Reports.');
+        if (!targetDevice.opened) {
+          await targetDevice.open();
+          logger.info(`Dispositivo abierto: ${targetDevice.productName}`);
         }
 
-        if (!selectedDevice.opened) {
-          await selectedDevice.open();
-          logger.info(`Dispositivo abierto: ${selectedDevice.productName}`);
-        }
-
-        this.hidDevice = selectedDevice;
+        this.hidDevice = targetDevice;
         this.detectReportId();
 
-        logger.info(`Conexión exitosa con ${selectedDevice.productName} (ReportID base: ${this.targetReportId})`);
+        logger.info(`Conexión exitosa con la pantalla del mouse! (ReportID: ${this.targetReportId})`);
         return true;
       } catch (err: any) {
         logger.error(`Error al conectar con WebHID: ${err?.message || err}`);
@@ -104,11 +115,26 @@ class MouseProtocolService {
     this.targetReportId = 0;
     if (this.hidDevice?.collections) {
       for (const col of this.hidDevice.collections) {
+        // Preferir la colección vendor
+        if (col.usagePage === 65535 || col.usagePage >= 0xff00) {
+          if (col.featureReports && col.featureReports.length > 0) {
+            const rep = col.featureReports[0];
+            if (typeof rep.reportId === 'number') {
+              this.targetReportId = rep.reportId;
+              logger.info(`Report ID vendor detectado: ${this.targetReportId}`);
+              return;
+            }
+          }
+        }
+      }
+
+      // Si no, cualquier featureReport
+      for (const col of this.hidDevice.collections) {
         if (col.featureReports && col.featureReports.length > 0) {
           const rep = col.featureReports[0];
           if (typeof rep.reportId === 'number') {
             this.targetReportId = rep.reportId;
-            logger.info(`Report ID detectado de la colección: ${this.targetReportId}`);
+            logger.info(`Report ID genérico detectado: ${this.targetReportId}`);
             return;
           }
         }
@@ -147,26 +173,45 @@ class MouseProtocolService {
       buf64.set(payload.subarray(0, Math.min(64, payload.byteLength)));
     }
 
+    // Probar con el targetReportId detectado
     try {
       await this.hidDevice.sendFeatureReport(this.targetReportId, buf64);
       return;
     } catch (err1: any) {
-      logger.warn(`Fallo reporte con ID ${this.targetReportId}: ${err1?.message || err1}. Probando IDs alternativos...`);
+      logger.warn(`ReportID ${this.targetReportId} falló: ${err1?.message || err1}. Probando IDs alternativos...`);
 
-      const altIds = [0, buf64[0], 7].filter(id => id !== this.targetReportId);
+      // Intentar alternativas comunes (0, el primer byte como opcode, o 7)
+      const altIds = [0, buf64[0], 7, 1].filter((id) => id !== this.targetReportId);
 
       for (const altId of altIds) {
         try {
           await this.hidDevice.sendFeatureReport(altId, buf64);
           this.targetReportId = altId;
-          logger.info(`Éxito con Report ID alternativo ${altId}`);
+          logger.info(`Éxito enviando con Report ID alternativo ${altId}!`);
           return;
         } catch {
-          // continuar
+          // continuar probando
         }
       }
 
-      logger.error('El microcontrolador rechazó todos los Report IDs probados.');
+      // Si falló en este dispositivo, intentar buscar entre las otras interfaces HID autorizadas
+      const allDevices: any[] = await (navigator as any).hid.getDevices();
+      for (const altDev of allDevices) {
+        if (altDev !== this.hidDevice && altDev.vendorId === VID_AJAZZ && altDev.productId === PID_AJAZZ_APEX) {
+          try {
+            if (!altDev.opened) await altDev.open();
+            await altDev.sendFeatureReport(0, buf64);
+            logger.info(`Éxito enviando a interfaz secundaria ${altDev.productName}!`);
+            this.hidDevice = altDev;
+            this.targetReportId = 0;
+            return;
+          } catch {
+            // continuar
+          }
+        }
+      }
+
+      logger.error('El microcontrolador rechazó el Feature Report en todas las interfaces.');
       throw new Error(`Error USB HID: El microcontrolador rechazó el Feature Report. Asegúrate de conectar el mouse/base por cable USB directo (no a través de un hub sin energía).`);
     }
   }
