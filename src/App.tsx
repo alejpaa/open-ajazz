@@ -3,7 +3,9 @@ import { ScreenStudio } from './components/ScreenStudio';
 import { DpiSettings } from './components/DpiSettings';
 import { LightingSettings } from './components/LightingSettings';
 import { BatteryStatus } from './components/BatteryStatus';
+import { ErrorNotification } from './components/ErrorNotification';
 import { mouseService } from './services/mouseProtocol';
+import { errorManager } from './services/errorHandler';
 import { Mouse, Image as ImageIcon, Sliders, Sparkles, Battery, Circle, Unplug, Check } from 'lucide-react';
 
 export default function App() {
@@ -26,14 +28,18 @@ export default function App() {
       if (ok) {
         setIsConnected(true);
         setDeviceName(mouseService.getDeviceName());
+        errorManager.showSuccess('Mouse Conectado', 'Enlace USB HID establecido con el mouse AJAZZ APEX.');
       }
     } catch (e: any) {
-      alert(`No se pudo conectar al mouse: ${e?.message || e}`);
+      errorManager.handle(e, 'Emparejamiento inicial USB');
     }
   };
 
   return (
-    <div className="flex h-screen w-screen bg-slate-950 text-slate-100 overflow-hidden font-sans">
+    <div className="flex h-screen w-screen bg-slate-950 text-slate-100 overflow-hidden font-sans relative">
+      {/* Toast / Global Error Notification System */}
+      <ErrorNotification />
+
       {/* Sidebar Navigation */}
       <aside className="w-64 bg-slate-900/90 border-r border-slate-800 flex flex-col justify-between p-4 shrink-0 select-none">
         <div className="space-y-6">
@@ -138,7 +144,7 @@ export default function App() {
 
         {/* Footer info */}
         <div className="pt-4 border-t border-slate-800 text-[11px] text-slate-500 text-center">
-          Open Source • WebHID & Tauri Ready
+          Open Source • Error Diagnostics Ready
         </div>
       </aside>
 

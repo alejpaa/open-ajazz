@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Sun, Sparkles, Check } from 'lucide-react';
 import { mouseService } from '../services/mouseProtocol';
+import { errorManager } from '../services/errorHandler';
 
 interface LightEffect {
   id: string;
@@ -35,9 +36,10 @@ export const LightingSettings: React.FC = () => {
     try {
       await mouseService.setLighting(selectedEffect, color, brightness, speed);
       setIsApplied(true);
+      errorManager.showSuccess('Iluminación Aplicada', `Efecto ${currentEffectConfig?.name || selectedEffect} actualizado en el mouse.`);
       setTimeout(() => setIsApplied(false), 2000);
     } catch (e: any) {
-      alert(`Error al aplicar iluminación: ${e?.message || e}`);
+      errorManager.handle(e, 'Configuración de iluminación RGB');
     }
   };
 

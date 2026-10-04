@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Sliders, Gauge, Zap, Check, Save } from 'lucide-react';
 import { mouseService, DpiStageConfig } from '../services/mouseProtocol';
+import { errorManager } from '../services/errorHandler';
 
 const DEFAULT_STAGES: DpiStageConfig[] = [
   { id: 1, value: 400, color: '#ef4444', enabled: true },
@@ -40,9 +41,10 @@ export const DpiSettings: React.FC = () => {
     try {
       await mouseService.setDpi(activeStageId, stages, pollingRate, debounceTime);
       setIsSaved(true);
+      errorManager.showSuccess('DPI Guardado', 'Los perfiles de sensibilidad y colores se aplicaron correctamente al mouse.');
       setTimeout(() => setIsSaved(false), 2500);
     } catch (e: any) {
-      alert(`Error al guardar configuración: ${e?.message || e}`);
+      errorManager.handle(e, 'Ajuste de perfiles de DPI y sensor');
     }
   };
 

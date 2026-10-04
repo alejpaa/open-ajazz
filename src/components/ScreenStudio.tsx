@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
-import { Upload, Clock, Image as ImageIcon, Play, Pause, Trash2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Upload, Clock, Image as ImageIcon, Play, Pause, Trash2 } from 'lucide-react';
 import { mouseService } from '../services/mouseProtocol';
+import { errorManager } from '../services/errorHandler';
 
 export const ScreenStudio: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -8,7 +9,6 @@ export const ScreenStudio: React.FC = () => {
   const [isPlaying, setIsPlaying] = useState(true);
   const [frameDelay, setFrameDelay] = useState(60); // ms
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
-  const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
 
@@ -18,23 +18,21 @@ export const ScreenStudio: React.FC = () => {
       setSelectedFile(file);
       const url = URL.createObjectURL(file);
       setPreviewUrl(url);
-      setStatusMessage({ type: 'info', text: `Archivo cargado: ${file.name} (${(file.size / 1024).toFixed(1)} KB)` });
+      errorManager.showSuccess('Imagen Cargada', `${file.name} listo para transferir.`);
     }
   };
 
   const handleSyncClock = async () => {
-    setStatusMessage({ type: 'info', text: 'Sincronizando reloj de la pantalla con fecha y hora actual...' });
     try {
       await mouseService.syncClock();
-      setStatusMessage({ type: 'success', text: '¡Reloj de la base sincronizado con éxito!' });
+      errorManager.showSuccess('Reloj Sincronizado', 'La hora y fecha de la base magnética se actualizaron correctamente.');
     } catch (err: any) {
-      setStatusMessage({ type: 'error', text: `Error al sincronizar reloj: ${err?.message || err}` });
+      errorManager.handle(err, 'Sincronización de hora en pantalla');
     }
   };
 
   const handleUploadScreen = async () => {
     if (!selectedFile || !imgRef.current) return;
-    setStatusMessage({ type: 'info', text: 'Iniciando transferencia a pantalla TFT 128x128...' });
     setUploadProgress(1);
 
     try {
@@ -43,10 +41,10 @@ export const ScreenStudio: React.FC = () => {
       });
 
       setUploadProgress(null);
-      setStatusMessage({ type: 'success', text: '¡Imagen transferida con éxito a la pantalla de la base!' });
+      errorManager.showSuccess('Transferencia Completada', 'La imagen se envió exitosamente a la pantalla TFT del mouse.');
     } catch (err: any) {
       setUploadProgress(null);
-      setStatusMessage({ type: 'error', text: `Error al transferir: ${err?.message || err}` });
+      errorManager.handle(err, 'Carga de imagen a pantalla TFT 128x128');
     }
   };
 
@@ -54,7 +52,6 @@ export const ScreenStudio: React.FC = () => {
     setSelectedFile(null);
     setPreviewUrl(null);
     setUploadProgress(null);
-    setStatusMessage(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -181,25 +178,6 @@ export const ScreenStudio: React.FC = () => {
                     style={{ width: `${uploadProgress}%` }}
                   />
                 </div>
-              </div>
-            )}
-
-            {statusMessage && (
-              <div
-                className={`p-3 rounded-lg text-xs flex items-center gap-2 border ${
-                  statusMessage.type === 'success'
-                    ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
-                    : statusMessage.type === 'error'
-                    ? 'bg-red-950/40 border-red-800/60 text-red-300'
-                    : 'bg-indigo-950/40 border-indigo-800/60 text-indigo-300'
-                }`}
-              >
-                {statusMessage.type === 'success' ? (
-                  <CheckCircle2 className="w-4 h-4 shrink-0" />
-                ) : (
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                )}
-                <span>{statusMessage.text}</span>
               </div>
             )}
 
