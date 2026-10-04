@@ -1,10 +1,4 @@
-/**
- * OpenAJAZZ - Servicio de Comunicación USB HID
- * 
- * Soporta de manera híbrida:
- * 1. WebHID API (para ejecución instantánea en navegadores como Chrome, Edge, Brave, Opera, etc.)
- * 2. Tauri IPC (para la aplicación de escritorio compilada con Rust en macOS, Linux y Windows)
- */
+import { logger } from './logger';
 
 export const VID_AJAZZ = 0x3151; // 12625
 export const PID_AJAZZ_APEX = 0x5007; // 20487
@@ -44,64 +38,64 @@ class MouseProtocolService {
    */
   async connect(): Promise<boolean> {
     if (this.isTauri) {
+      logger.info('Modo Tauri nativo activo.');
       return true;
     }
 
     if (typeof navigator !== 'undefined' && 'hid' in navigator) {
       try {
+        logger.info(`Solicitando dispositivo USB HID (${VID_AJAZZ.toString(16)}:${PID_AJAZZ_APEX.toString(16)})...`);
         const devices = await (navigator as any).hid.requestDevice({
           filters: [{ vendorId: VID_AJAZZ, productId: PID_AJAZZ_APEX }]
         });
 
         if (!devices || devices.length === 0) {
+          logger.warn('El usuario canceló la selección de dispositivo USB.');
           throw new Error('No se seleccionó ningún dispositivo USB.');
         }
 
-        console.log(`[OpenAJAZZ] Se encontraron ${devices.length} colecciones/interfaces HID.`);
+        logger.info(`Se encontraron ${devices.length} interfaces/colecciones.`);
 
-        // Buscamos prioritariamente la interfaz Vendor (UsagePage 65535 o la que tenga Feature Reports de 64 bytes)
         let selectedDevice: any = null;
 
         for (let i = 0; i < devices.length; i++) {
           const d = devices[i];
-          console.log(`[OpenAJAZZ] Analizando colección ${i}:`, d.collections);
-
-          const hasVendorCollection = d.collections?.some((c: any) => {
+          const hasVendor = d.collections?.some((c: any) => {
             const isVendor = c.usagePage === 65535 || c.usagePage === 0xff00 || (c.usagePage >= 0xff00 && c.usagePage <= 0xffff);
             const hasFeature = c.featureReports && c.featureReports.length > 0;
             return isVendor || hasFeature;
           });
 
-          if (hasVendorCollection) {
+          if (hasVendor) {
             selectedDevice = d;
-            console.log(`[OpenAJAZZ] Colección Vendor encontrada en el índice ${i}!`);
+            logger.info(`Interfaz Vendor identificada en colección [${i}].`);
             break;
           }
         }
 
-        // Si no se identificó por usagePage, buscamos cualquiera que tenga featureReports
         if (!selectedDevice) {
           selectedDevice = devices.find((d: any) =>
             d.collections?.some((c: any) => c.featureReports && c.featureReports.length > 0)
           ) || devices[0];
+          logger.warn('No se detectó UsagePage 65535 exacto, usando primera colección con Feature Reports.');
         }
 
         if (!selectedDevice.opened) {
           await selectedDevice.open();
+          logger.info(`Dispositivo abierto: ${selectedDevice.productName}`);
         }
 
         this.hidDevice = selectedDevice;
-
-        // Determinar el Report ID esperado por la colección
         this.detectReportId();
 
-        console.log('[OpenAJAZZ] Dispositivo conectado con éxito:', selectedDevice.productName, 'ReportID:', this.targetReportId);
+        logger.info(`Conexión exitosa con ${selectedDevice.productName} (ReportID base: ${this.targetReportId})`);
         return true;
       } catch (err: any) {
-        console.error('[OpenAJAZZ] Error conectando:', err);
+        logger.error(`Error al conectar con WebHID: ${err?.message || err}`);
         throw err;
       }
     } else {
+      logger.error('Navegador incompatible: navigator.hid no existe.');
       throw new Error('Tu navegador no soporta WebHID. Utiliza Chrome, Edge, Brave o la app de escritorio compilada.');
     }
   }
@@ -114,7 +108,7 @@ class MouseProtocolService {
           const rep = col.featureReports[0];
           if (typeof rep.reportId === 'number') {
             this.targetReportId = rep.reportId;
-            console.log('[OpenAJAZZ] Detectado reportId de la colección:', this.targetReportId);
+            logger.info(`Report ID detectado de la colección: ${this.targetReportId}`);
             return;
           }
         }
@@ -145,7 +139,6 @@ class MouseProtocolService {
       if (!ok || !this.hidDevice) throw new Error('Dispositivo no conectado. Haz clic en "Conectar Mouse USB".');
     }
 
-    // Asegurar buffer de exactamente 64 bytes
     let buf64: Uint8Array;
     if (payload.byteLength === 64) {
       buf64 = payload;
@@ -154,29 +147,26 @@ class MouseProtocolService {
       buf64.set(payload.subarray(0, Math.min(64, payload.byteLength)));
     }
 
-    // Intento 1: con el reportId detectado (o 0)
     try {
       await this.hidDevice.sendFeatureReport(this.targetReportId, buf64);
       return;
-    } catch (err1) {
-      console.warn(`[OpenAJAZZ] Falló con reportId ${this.targetReportId}. Probando alternativas...`, err1);
+    } catch (err1: any) {
+      logger.warn(`Fallo reporte con ID ${this.targetReportId}: ${err1?.message || err1}. Probando IDs alternativos...`);
 
-      // Si targetReportId era 0, probamos con el primer byte o con reportId alternativos
       const altIds = [0, buf64[0], 7].filter(id => id !== this.targetReportId);
 
       for (const altId of altIds) {
         try {
-          console.log(`[OpenAJAZZ] Intentando con reportId ${altId}...`);
           await this.hidDevice.sendFeatureReport(altId, buf64);
           this.targetReportId = altId;
-          console.log(`[OpenAJAZZ] ¡Éxito con reportId ${altId}!`);
+          logger.info(`Éxito con Report ID alternativo ${altId}`);
           return;
-        } catch (errAlt) {
-          // continuar con el siguiente
+        } catch {
+          // continuar
         }
       }
 
-      // Si ninguna alternativa funcionó, lanzar el error con detalles
+      logger.error('El microcontrolador rechazó todos los Report IDs probados.');
       throw new Error(`Error USB HID: El microcontrolador rechazó el Feature Report. Asegúrate de conectar el mouse/base por cable USB directo (no a través de un hub sin energía).`);
     }
   }
@@ -185,9 +175,11 @@ class MouseProtocolService {
    * Sincroniza la hora y fecha del sistema en la pantalla TFT
    */
   async syncClock(): Promise<void> {
+    logger.tx('Iniciando sincronización de reloj (Opcode 0x28)...');
     if (this.isTauri) {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('sync_clock');
+      logger.rx('Reloj sincronizado vía Tauri IPC.');
       return;
     }
 
@@ -204,12 +196,14 @@ class MouseProtocolService {
     buf[14] = now.getSeconds();
 
     await this.sendFeatureReport(buf);
+    logger.rx(`Reloj sincronizado: ${now.toLocaleTimeString()}`);
   }
 
   /**
    * Configura las etapas de DPI y sus colores LED asociados
    */
   async setDpi(activeStage: number, stages: DpiStageConfig[], pollingRate: number, debounceTime: number): Promise<void> {
+    logger.tx(`Configurando DPI: etapa activa=${activeStage}, polling=${pollingRate}Hz, debounce=${debounceTime}ms`);
     if (this.isTauri) {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('save_dpi_settings', {
@@ -221,10 +215,9 @@ class MouseProtocolService {
       return;
     }
 
-    // 1. Enviar parámetros de sensor (0x53)
     const buf0 = new Uint8Array(64);
     buf0[0] = CMD_MOUSE_SET_OPTIONPARAM0; // 0x53
-    buf0[8] = 0; // Perfil 0
+    buf0[8] = 0;
     buf0[9] = pollingRate === 8000 ? 6 : pollingRate === 4000 ? 5 : pollingRate === 2000 ? 4 : pollingRate === 1000 ? 3 : pollingRate === 500 ? 2 : 1;
     buf0[10] = 1;
     buf0[16] = Math.min(20, debounceTime);
@@ -234,7 +227,6 @@ class MouseProtocolService {
 
     await new Promise(r => setTimeout(r, 20));
 
-    // 2. Enviar valores de DPI y colores (0x54)
     const buf1 = new Uint8Array(64);
     buf1[0] = CMD_MOUSE_SET_OPTIONPARAM1; // 0x54
     buf1[1] = 0;
@@ -243,11 +235,9 @@ class MouseProtocolService {
     buf1[3] = Math.min(8, enabledStages.length);
 
     enabledStages.slice(0, 8).forEach((stage, i) => {
-      // DPI como UInt16 Little Endian
       buf1[8 + i * 2] = stage.value & 0xff;
       buf1[9 + i * 2] = (stage.value >> 8) & 0xff;
 
-      // Colores RGB
       const rgb = this.hexToRgb(stage.color);
       buf1[40 + i * 3] = rgb.r;
       buf1[41 + i * 3] = rgb.g;
@@ -255,12 +245,14 @@ class MouseProtocolService {
     });
 
     await this.sendFeatureReport(buf1);
+    logger.rx('Parámetros de DPI y sensor guardados en el dispositivo.');
   }
 
   /**
    * Configura los efectos de iluminación RGB
    */
   async setLighting(effect: string, color: string, brightness: number, speed: number): Promise<void> {
+    logger.tx(`Configurando iluminación: efecto=${effect}, color=${color}, brillo=${brightness}%`);
     if (this.isTauri) {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('set_lighting_settings', { effect, color, brightness, speed });
@@ -279,6 +271,7 @@ class MouseProtocolService {
     buf[6] = rgb.b;
 
     await this.sendFeatureReport(buf);
+    logger.rx('Efecto de iluminación aplicado.');
   }
 
   /**
@@ -288,7 +281,7 @@ class MouseProtocolService {
     imgElement: HTMLImageElement,
     onProgress: (percent: number) => void
   ): Promise<void> {
-    // 1. Redimensionar en un Canvas a 128x128 exactos
+    logger.tx('Procesando imagen para pantalla TFT 128x128...');
     const canvas = document.createElement('canvas');
     canvas.width = 128;
     canvas.height = 128;
@@ -298,7 +291,7 @@ class MouseProtocolService {
     ctx.drawImage(imgElement, 0, 0, 128, 128);
     const imgData = ctx.getImageData(0, 0, 128, 128).data;
 
-    // 2. Convertir píxeles RGBA (128*128*4) a RGB565 (128*128*2 = 32,768 bytes)
+    // Convertir a RGB565 (32,768 bytes)
     const rawBytes = new Uint8Array(128 * 128 * 2);
     let byteIdx = 0;
     for (let i = 0; i < imgData.length; i += 4) {
@@ -317,35 +310,36 @@ class MouseProtocolService {
 
     onProgress(5);
 
-    // 3. Handshake inicial (0x25 / FEA_CMD_GETTFTLCDDATA)
+    // Handshake inicial (0x25)
+    logger.tx('Enviando handshake TFT (Opcode 0x25, 32768 bytes)...');
     const handshake = new Uint8Array(64);
     handshake[0] = CMD_GETTFTLCDDATA; // 0x25
-    handshake[1] = 0; // currentFrame
-    handshake[2] = 1; // totalFrames
-    handshake[3] = 60; // delay
-    const totalBytes = 128 * 128 * 2; // 32768
+    handshake[1] = 0;
+    handshake[2] = 1;
+    handshake[3] = 60;
+    const totalBytes = 128 * 128 * 2;
     handshake[4] = totalBytes & 0xff;
     handshake[5] = (totalBytes >> 8) & 0xff;
-    handshake[6] = 0;
-    handshake[7] = 0;
-    handshake[8] = 0;   // left
-    handshake[9] = 0;   // top
-    handshake[10] = 127; // right
-    handshake[11] = 127; // bottom
+    handshake[8] = 0;
+    handshake[9] = 0;
+    handshake[10] = 127;
+    handshake[11] = 127;
 
     await this.sendFeatureReport(handshake);
     await new Promise(r => setTimeout(r, 60));
 
-    // 4. Fragmentación en paquetes de 56 bytes útiles (total 586 paquetes)
+    // Fragmentación en 586 bloques de 56 bytes
     const totalChunks = Math.ceil(totalBytes / 56);
+    logger.tx(`Iniciando transmisión de ${totalChunks} paquetes HID...`);
+
     for (let y = 0; y < totalChunks; y++) {
       const packet = new Uint8Array(64);
       packet[0] = CMD_SETTFTLCDDATA; // 0x25
-      packet[1] = 0; // estático
+      packet[1] = 0;
       packet[2] = y & 0xff;
-      packet[3] = 0; // frame 0
+      packet[3] = 0;
       packet[4] = 60;
-      packet[5] = 1; // layer 1
+      packet[5] = 1;
       packet[6] = y & 0xff;
       packet[7] = (y >> 8) & 0xff;
 
@@ -362,6 +356,7 @@ class MouseProtocolService {
       }
     }
 
+    logger.rx('Transferencia completa de 32768 bytes a pantalla TFT.');
     onProgress(100);
   }
 

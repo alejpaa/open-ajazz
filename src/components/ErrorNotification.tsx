@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { errorManager, AppError } from '../services/errorHandler';
-import { AlertCircle, AlertTriangle, CheckCircle2, Info, X, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
+import { logger } from '../services/logger';
+import { AlertCircle, AlertTriangle, CheckCircle2, Info, X, ChevronDown, ChevronUp, Copy, Check, Send } from 'lucide-react';
 
 export const ErrorNotification: React.FC = () => {
   const [error, setError] = useState<AppError | null>(null);
   const [showDetails, setShowDetails] = useState<boolean>(false);
-  const [copied, setCopied] = useState<boolean>(false);
+  const [copiedReport, setCopiedReport] = useState<boolean>(false);
+  const [copiedDetails, setCopiedDetails] = useState<boolean>(false);
 
   useEffect(() => {
     return errorManager.subscribe((err) => {
@@ -23,11 +25,18 @@ export const ErrorNotification: React.FC = () => {
 
   if (!error) return null;
 
+  const handleCopyDiagnosticReport = () => {
+    const report = logger.generateDiagnosticReport(error);
+    navigator.clipboard.writeText(report);
+    setCopiedReport(true);
+    setTimeout(() => setCopiedReport(false), 2500);
+  };
+
   const handleCopyDetails = () => {
     if (error.technicalDetails) {
       navigator.clipboard.writeText(error.technicalDetails);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setCopiedDetails(true);
+      setTimeout(() => setCopiedDetails(false), 2000);
     }
   };
 
@@ -48,14 +57,14 @@ export const ErrorNotification: React.FC = () => {
   const getBorderColor = () => {
     switch (error.severity) {
       case 'error':
-        return 'border-red-500/60 bg-red-950/90 shadow-red-900/30';
+        return 'border-red-500/60 bg-slate-900/95 shadow-red-950/50';
       case 'warning':
-        return 'border-amber-500/60 bg-amber-950/90 shadow-amber-900/30';
+        return 'border-amber-500/60 bg-slate-900/95 shadow-amber-950/50';
       case 'success':
-        return 'border-emerald-500/60 bg-emerald-950/90 shadow-emerald-900/30';
+        return 'border-emerald-500/60 bg-slate-900/95 shadow-emerald-950/50';
       case 'info':
       default:
-        return 'border-indigo-500/60 bg-slate-900/95 shadow-indigo-900/30';
+        return 'border-indigo-500/60 bg-slate-900/95 shadow-indigo-950/50';
     }
   };
 
@@ -91,6 +100,32 @@ export const ErrorNotification: React.FC = () => {
           </div>
         )}
 
+        {/* Action button to copy diagnostic report to send to assistant */}
+        {error.severity === 'error' && (
+          <div className="mt-3">
+            <button
+              onClick={handleCopyDiagnosticReport}
+              className={`w-full py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer border ${
+                copiedReport
+                  ? 'bg-emerald-600/30 border-emerald-500 text-emerald-300'
+                  : 'bg-indigo-600/30 hover:bg-indigo-600/50 border-indigo-500/60 text-indigo-200'
+              }`}
+            >
+              {copiedReport ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>¡Reporte copiado! Pégalo aquí en el chat</span>
+                </>
+              ) : (
+                <>
+                  <Send className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Copiar reporte completo para el asistente</span>
+                </>
+              )}
+            </button>
+          </div>
+        )}
+
         {/* Collapsible Technical Details */}
         {error.technicalDetails && (
           <div className="mt-3 pt-2 border-t border-white/10">
@@ -98,7 +133,7 @@ export const ErrorNotification: React.FC = () => {
               onClick={() => setShowDetails(!showDetails)}
               className="flex items-center justify-between w-full text-[11px] text-slate-400 hover:text-slate-200 transition cursor-pointer"
             >
-              <span>Detalles técnicos para diagnóstico</span>
+              <span>Detalles técnicos internos</span>
               {showDetails ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
             </button>
 
@@ -111,8 +146,8 @@ export const ErrorNotification: React.FC = () => {
                   onClick={handleCopyDetails}
                   className="flex items-center gap-1.5 text-[10px] font-mono text-indigo-400 hover:text-indigo-300 transition cursor-pointer"
                 >
-                  {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-                  {copied ? 'Copiado al portapapeles' : 'Copiar registro técnico'}
+                  {copiedDetails ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                  {copiedDetails ? 'Copiado al portapapeles' : 'Copiar solo este mensaje técnico'}
                 </button>
               </div>
             )}

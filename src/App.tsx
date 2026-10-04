@@ -6,20 +6,21 @@ import { BatteryStatus } from './components/BatteryStatus';
 import { ErrorNotification } from './components/ErrorNotification';
 import { mouseService } from './services/mouseProtocol';
 import { errorManager } from './services/errorHandler';
-import { Mouse, Image as ImageIcon, Sliders, Sparkles, Battery, Circle, Unplug, Check } from 'lucide-react';
+import { logger, LogEntry } from './services/logger';
+import { Mouse, Image as ImageIcon, Sliders, Sparkles, Battery, Circle, Unplug, Check, Terminal, Copy, Trash2, X } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'screen' | 'dpi' | 'lighting' | 'battery'>('screen');
   const [isConnected, setIsConnected] = useState(false);
   const [deviceName, setDeviceName] = useState('AJAZZ APEX');
-
-  const checkConnection = () => {
-    setIsConnected(mouseService.isConnected());
-    setDeviceName(mouseService.getDeviceName());
-  };
+  const [showLogsModal, setShowLogsModal] = useState(false);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [copiedReport, setCopiedReport] = useState(false);
 
   useEffect(() => {
-    checkConnection();
+    setIsConnected(mouseService.isConnected());
+    setDeviceName(mouseService.getDeviceName());
+    return logger.subscribe(setLogs);
   }, []);
 
   const handleConnect = async () => {
@@ -33,6 +34,13 @@ export default function App() {
     } catch (e: any) {
       errorManager.handle(e, 'Emparejamiento inicial USB');
     }
+  };
+
+  const handleCopyLogs = () => {
+    const report = logger.generateDiagnosticReport();
+    navigator.clipboard.writeText(report);
+    setCopiedReport(true);
+    setTimeout(() => setCopiedReport(false), 2000);
   };
 
   return (
@@ -142,15 +150,23 @@ export default function App() {
           </nav>
         </div>
 
-        {/* Footer info */}
-        <div className="pt-4 border-t border-slate-800 text-[11px] text-slate-500 text-center">
-          Open Source • Error Diagnostics Ready
+        {/* Footer info & Logs trigger */}
+        <div className="pt-3 border-t border-slate-800 space-y-2">
+          <button
+            onClick={() => setShowLogsModal(true)}
+            className="w-full flex items-center justify-center gap-1.5 py-1.5 px-2 bg-slate-800/60 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded-lg text-[11px] font-mono transition cursor-pointer"
+          >
+            <Terminal className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Ver Logs / Diagnóstico</span>
+          </button>
+          <div className="text-[10px] text-slate-500 text-center">
+            Open Source • WebHID & Tauri Ready
+          </div>
         </div>
       </aside>
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col overflow-hidden bg-slate-950">
-        {/* Top Header Bar */}
         <header className="h-14 border-b border-slate-800/80 px-6 flex items-center justify-between bg-slate-900/40 backdrop-blur shrink-0">
           <div className="flex items-center gap-3 text-xs">
             <span className="text-slate-400">Perfil Activo:</span>
@@ -177,7 +193,6 @@ export default function App() {
           </div>
         </header>
 
-        {/* Scrollable Tab Content */}
         <div className="flex-1 overflow-y-auto p-8">
           <div className="max-w-5xl mx-auto">
             {activeTab === 'screen' && <ScreenStudio />}
@@ -187,6 +202,89 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {/* Logs & Diagnostic Modal */}
+      {showLogsModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in duration-150">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full flex flex-col max-h-[80vh] shadow-2xl overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Terminal className="w-5 h-5 text-indigo-400" />
+                <h3 className="text-sm font-bold text-white">Registro de Eventos y Diagnóstico USB</h3>
+              </div>
+              <button
+                onClick={() => setShowLogsModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Body / Terminal window */}
+            <div className="flex-1 p-4 overflow-y-auto bg-slate-950 font-mono text-xs space-y-1.5 select-text">
+              {logs.length === 0 ? (
+                <div className="text-slate-600 text-center py-10">No hay registros aún. Conecta el mouse para ver eventos.</div>
+              ) : (
+                logs.map((log) => (
+                  <div key={log.id} className="flex items-start gap-2 leading-relaxed">
+                    <span className="text-slate-500 text-[10px] shrink-0">{log.timestamp}</span>
+                    <span
+                      className={`uppercase text-[10px] px-1 py-0.5 rounded font-bold shrink-0 ${
+                        log.type === 'error'
+                          ? 'bg-red-950 text-red-400 border border-red-800/40'
+                          : log.type === 'warn'
+                          ? 'bg-amber-950 text-amber-400 border border-amber-800/40'
+                          : log.type === 'tx'
+                          ? 'bg-indigo-950 text-indigo-400 border border-indigo-800/40'
+                          : log.type === 'rx'
+                          ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/40'
+                          : 'bg-slate-900 text-slate-400'
+                      }`}
+                    >
+                      {log.type}
+                    </span>
+                    <span
+                      className={`break-all ${
+                        log.type === 'error'
+                          ? 'text-red-300 font-medium'
+                          : log.type === 'warn'
+                          ? 'text-amber-300'
+                          : 'text-slate-300'
+                      }`}
+                    >
+                      {log.message}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-3 border-t border-slate-800 bg-slate-900 flex justify-between items-center">
+              <button
+                onClick={() => logger.clear()}
+                className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition px-2 py-1 rounded hover:bg-slate-800 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Limpiar Logs
+              </button>
+
+              <button
+                onClick={handleCopyLogs}
+                className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+                  copiedReport
+                    ? 'bg-emerald-600/30 border-emerald-500 text-emerald-300'
+                    : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/20'
+                }`}
+              >
+                {copiedReport ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                {copiedReport ? '¡Reporte copiado al portapapeles!' : 'Copiar Reporte Completo para el Asistente'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
