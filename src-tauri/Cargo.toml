@@ -1,0 +1,23 @@
+[package]
+name = "openajazz"
+version = "0.1.0"
+description = "Suite Open Source para mouse AJAZZ AJ159/AJ179 APEX"
+authors = ["Alejandro"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0.0", features = ["tray-icon"] }
+tauri-plugin-shell = "2.0.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hidapi = "2.6"
+image = { version = "0.25", default-features = false, features = ["gif", "png", "jpeg"] }
+chrono = "0.4"
+tokio = { version = "1", features = ["full"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

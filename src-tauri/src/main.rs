@@ -1,0 +1,56 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod protocol;
+
+use protocol::{AjazzMouseDevice, BatteryInfo, DpiStageConfig};
+
+#[tauri::command]
+fn sync_clock() -> Result<String, String> {
+    let dev = AjazzMouseDevice::open()?;
+    AjazzMouseDevice::sync_clock(&dev)?;
+    Ok("Reloj sincronizado correctamente".into())
+}
+
+#[tauri::command]
+fn get_battery_status() -> Result<BatteryInfo, String> {
+    let dev = AjazzMouseDevice::open()?;
+    AjazzMouseDevice::get_battery(&dev)
+}
+
+#[tauri::command]
+fn save_dpi_settings(
+    active_stage: u8,
+    polling_rate: u16,
+    debounce_time: u8,
+    stages: Vec<DpiStageConfig>,
+) -> Result<String, String> {
+    let dev = AjazzMouseDevice::open()?;
+    AjazzMouseDevice::set_dpi(&dev, active_stage, &stages)?;
+    AjazzMouseDevice::set_sensor_params(&dev, polling_rate, debounce_time)?;
+    Ok("Configuración de DPI y sensor guardada en el mouse".into())
+}
+
+#[tauri::command]
+fn set_lighting_settings(
+    effect: String,
+    color: String,
+    brightness: u8,
+    speed: u8,
+) -> Result<String, String> {
+    let dev = AjazzMouseDevice::open()?;
+    AjazzMouseDevice::set_lighting(&dev, &effect, &color, brightness, speed)?;
+    Ok("Iluminación aplicada con éxito".into())
+}
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .invoke_handler(tauri::generate_handler![
+            sync_clock,
+            get_battery_status,
+            save_dpi_settings,
+            set_lighting_settings
+        ])
+        .run(tauri::generate_context!())
+        .expect("Error al iniciar aplicación OpenAJAZZ");
+}
