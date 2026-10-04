@@ -37,9 +37,10 @@ export interface BatteryInfo {
 class MouseProtocolService {
   private hidDevice: any = null;
   private isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
+  private targetReportId: number = 0;
 
   /**
-   * Conecta con el dispositivo USB HID
+   * Conecta con el dispositivo USB HID buscando específicamente la interfaz Vendor (UsagePage 0xFFFF / 65535)
    */
   async connect(): Promise<boolean> {
     if (this.isTauri) {
@@ -52,26 +53,73 @@ class MouseProtocolService {
           filters: [{ vendorId: VID_AJAZZ, productId: PID_AJAZZ_APEX }]
         });
 
-        if (devices && devices.length > 0) {
-          // Buscamos la interfaz 1 o la que permita feature reports
-          for (const d of devices) {
-            if (!d.opened) {
-              await d.open();
-            }
-            this.hidDevice = d;
-            console.log('Conectado a dispositivo WebHID:', d.productName, d);
-            return true;
+        if (!devices || devices.length === 0) {
+          throw new Error('No se seleccionó ningún dispositivo USB.');
+        }
+
+        console.log(`[OpenAJAZZ] Se encontraron ${devices.length} colecciones/interfaces HID.`);
+
+        // Buscamos prioritariamente la interfaz Vendor (UsagePage 65535 o la que tenga Feature Reports de 64 bytes)
+        let selectedDevice: any = null;
+
+        for (let i = 0; i < devices.length; i++) {
+          const d = devices[i];
+          console.log(`[OpenAJAZZ] Analizando colección ${i}:`, d.collections);
+
+          const hasVendorCollection = d.collections?.some((c: any) => {
+            const isVendor = c.usagePage === 65535 || c.usagePage === 0xff00 || (c.usagePage >= 0xff00 && c.usagePage <= 0xffff);
+            const hasFeature = c.featureReports && c.featureReports.length > 0;
+            return isVendor || hasFeature;
+          });
+
+          if (hasVendorCollection) {
+            selectedDevice = d;
+            console.log(`[OpenAJAZZ] Colección Vendor encontrada en el índice ${i}!`);
+            break;
           }
         }
-      } catch (err) {
-        console.error('Error al solicitar dispositivo WebHID:', err);
+
+        // Si no se identificó por usagePage, buscamos cualquiera que tenga featureReports
+        if (!selectedDevice) {
+          selectedDevice = devices.find((d: any) =>
+            d.collections?.some((c: any) => c.featureReports && c.featureReports.length > 0)
+          ) || devices[0];
+        }
+
+        if (!selectedDevice.opened) {
+          await selectedDevice.open();
+        }
+
+        this.hidDevice = selectedDevice;
+
+        // Determinar el Report ID esperado por la colección
+        this.detectReportId();
+
+        console.log('[OpenAJAZZ] Dispositivo conectado con éxito:', selectedDevice.productName, 'ReportID:', this.targetReportId);
+        return true;
+      } catch (err: any) {
+        console.error('[OpenAJAZZ] Error conectando:', err);
         throw err;
       }
     } else {
       throw new Error('Tu navegador no soporta WebHID. Utiliza Chrome, Edge, Brave o la app de escritorio compilada.');
     }
+  }
 
-    return false;
+  private detectReportId() {
+    this.targetReportId = 0;
+    if (this.hidDevice?.collections) {
+      for (const col of this.hidDevice.collections) {
+        if (col.featureReports && col.featureReports.length > 0) {
+          const rep = col.featureReports[0];
+          if (typeof rep.reportId === 'number') {
+            this.targetReportId = rep.reportId;
+            console.log('[OpenAJAZZ] Detectado reportId de la colección:', this.targetReportId);
+            return;
+          }
+        }
+      }
+    }
   }
 
   isConnected(): boolean {
@@ -85,11 +133,10 @@ class MouseProtocolService {
   }
 
   /**
-   * Envía un reporte Feature HID (64 bytes)
+   * Envía un reporte Feature HID asegurando el tamaño exacto y probando fallback de reportId si es necesario
    */
   private async sendFeatureReport(payload: Uint8Array): Promise<void> {
     if (this.isTauri) {
-      // Invocación a Tauri
       return;
     }
 
@@ -98,14 +145,39 @@ class MouseProtocolService {
       if (!ok || !this.hidDevice) throw new Error('Dispositivo no conectado. Haz clic en "Conectar Mouse USB".');
     }
 
+    // Asegurar buffer de exactamente 64 bytes
+    let buf64: Uint8Array;
+    if (payload.byteLength === 64) {
+      buf64 = payload;
+    } else {
+      buf64 = new Uint8Array(64);
+      buf64.set(payload.subarray(0, Math.min(64, payload.byteLength)));
+    }
+
+    // Intento 1: con el reportId detectado (o 0)
     try {
-      // WebHID: sendFeatureReport(reportId, data)
-      // Si el primer byte es 0x00 se usa como reportId, si no reportId=0 y data=payload
-      const reportId = 0;
-      await this.hidDevice.sendFeatureReport(reportId, payload);
-    } catch (e) {
-      console.error('Error enviando Feature Report por WebHID:', e);
-      throw e;
+      await this.hidDevice.sendFeatureReport(this.targetReportId, buf64);
+      return;
+    } catch (err1) {
+      console.warn(`[OpenAJAZZ] Falló con reportId ${this.targetReportId}. Probando alternativas...`, err1);
+
+      // Si targetReportId era 0, probamos con el primer byte o con reportId alternativos
+      const altIds = [0, buf64[0], 7].filter(id => id !== this.targetReportId);
+
+      for (const altId of altIds) {
+        try {
+          console.log(`[OpenAJAZZ] Intentando con reportId ${altId}...`);
+          await this.hidDevice.sendFeatureReport(altId, buf64);
+          this.targetReportId = altId;
+          console.log(`[OpenAJAZZ] ¡Éxito con reportId ${altId}!`);
+          return;
+        } catch (errAlt) {
+          // continuar con el siguiente
+        }
+      }
+
+      // Si ninguna alternativa funcionó, lanzar el error con detalles
+      throw new Error(`Error USB HID: El microcontrolador rechazó el Feature Report. Asegúrate de conectar el mouse/base por cable USB directo (no a través de un hub sin energía).`);
     }
   }
 
@@ -262,13 +334,13 @@ class MouseProtocolService {
     handshake[11] = 127; // bottom
 
     await this.sendFeatureReport(handshake);
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 60));
 
     // 4. Fragmentación en paquetes de 56 bytes útiles (total 586 paquetes)
     const totalChunks = Math.ceil(totalBytes / 56);
     for (let y = 0; y < totalChunks; y++) {
       const packet = new Uint8Array(64);
-      packet[0] = CMD_SETTFTLCDDATA; // 0x25 (o 0x24)
+      packet[0] = CMD_SETTFTLCDDATA; // 0x25
       packet[1] = 0; // estático
       packet[2] = y & 0xff;
       packet[3] = 0; // frame 0
@@ -282,12 +354,11 @@ class MouseProtocolService {
 
       await this.sendFeatureReport(packet);
 
-      // Reportar progreso y pausa de 2ms para no saturar el buffer USB del microcontrolador
       if (y % 15 === 0 || y === totalChunks - 1) {
         onProgress(Math.min(99, Math.round((y / totalChunks) * 95) + 5));
-        await new Promise(r => setTimeout(r, 4));
+        await new Promise(r => setTimeout(r, 6));
       } else {
-        await new Promise(r => setTimeout(r, 2));
+        await new Promise(r => setTimeout(r, 3));
       }
     }
 
