@@ -37,14 +37,18 @@ export interface ScreenHardwareInfo {
 }
 
 class MouseProtocolService {
-  private hidDevice: any = null;
+  private hidDevice: any = null; // Dispositivo activo por defecto
+  private screenDevice: any = null; // Interfaz específica de la pantalla (Usage 2 / base magnética)
+  private mouseDevice: any = null; // Interfaz específica del sensor/DPI del mouse (Usage 1)
+  private screenReportId: number = 0;
+  private mouseReportId: number = 0;
   private isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
-  private targetReportId: number = 0;
   private screenInfo: ScreenHardwareInfo = { verified: false };
 
   /**
-   * Conecta con el dispositivo USB HID buscando estrictamente la interfaz Vendor (UsagePage 0xFFFF / 65535)
-   * Si forcePrompt es true, abre obligatoriamente la ventana del navegador para que el usuario elija el dispositivo correcto.
+   * Conecta con el mouse y la base de carga.
+   * Prioriza encontrar la base con pantalla TFT (UsagePage 0xFFFF / Usage 2)
+   * y el controlador del mouse (UsagePage 0xFFFF / Usage 1).
    */
   async connect(forcePrompt: boolean = false): Promise<boolean> {
     if (this.isTauri) {
@@ -55,33 +59,27 @@ class MouseProtocolService {
 
     if (typeof navigator !== 'undefined' && 'hid' in navigator) {
       try {
-        logger.info(`Buscando mouse AJAZZ APEX (${VID_AJAZZ.toString(16)}:${PID_AJAZZ_APEX.toString(16)})...`);
+        logger.info(`Escaneando dispositivos AJAZZ APEX (${VID_AJAZZ.toString(16)}:${PID_AJAZZ_APEX.toString(16)})...`);
 
-        let targetDevice: any = null;
+        let allDevices: any[] = await (navigator as any).hid.getDevices();
+        allDevices = allDevices.filter(
+          (d) => d.vendorId === VID_AJAZZ && d.productId === PID_AJAZZ_APEX
+        );
 
-        if (forcePrompt) {
-          logger.info('Forzando ventana de selección de dispositivo USB...');
-          const requested = await (navigator as any).hid.requestDevice({
-            filters: [
-              { vendorId: VID_AJAZZ, productId: PID_AJAZZ_APEX, usagePage: 0xFFFF, usage: 2 },
-              { vendorId: VID_AJAZZ, productId: PID_AJAZZ_APEX, usagePage: 0xFFFF },
-              { vendorId: VID_AJAZZ, productId: PID_AJAZZ_APEX },
-            ],
-          });
-          if (!requested || requested.length === 0) {
-            logger.warn('El usuario canceló la selección de dispositivo USB.');
-            throw new Error('No se seleccionó ningún dispositivo USB.');
-          }
-          targetDevice = requested[0];
-        } else {
-          // 1. Obtener dispositivos ya autorizados
-          let allDevices: any[] = await (navigator as any).hid.getDevices();
-          allDevices = allDevices.filter(
-            (d) => d.vendorId === VID_AJAZZ && d.productId === PID_AJAZZ_APEX
-          );
+        // Buscar el dispositivo de pantalla (Usage 2 / 0xFFFF)
+        this.screenDevice = allDevices.find((d) =>
+          d.collections?.some((c: any) => (c.usagePage === 65535 || c.usagePage === 0xFFFF) && c.usage === 2)
+        );
 
-          if (allDevices.length === 0) {
-            logger.info('No hay dispositivos autorizados en caché. Abriendo ventana de selección...');
+        // Buscar el dispositivo de mouse (Usage 1 / 0xFFFF)
+        this.mouseDevice = allDevices.find((d) =>
+          d.collections?.some((c: any) => (c.usagePage === 65535 || c.usagePage === 0xFFFF) && c.usage === 1)
+        ) || allDevices.find((d) => d !== this.screenDevice) || allDevices[0];
+
+        // Si falta la pantalla o se fuerza el selector, abrir la ventana del navegador
+        if (!this.screenDevice || forcePrompt) {
+          logger.info('Solicitando selección de la Base de Carga con Pantalla TFT (Usage: 2)...');
+          try {
             const requested = await (navigator as any).hid.requestDevice({
               filters: [
                 { vendorId: VID_AJAZZ, productId: PID_AJAZZ_APEX, usagePage: 0xFFFF, usage: 2 },
@@ -89,61 +87,63 @@ class MouseProtocolService {
                 { vendorId: VID_AJAZZ, productId: PID_AJAZZ_APEX },
               ],
             });
-            if (!requested || requested.length === 0) {
-              logger.warn('El usuario canceló la selección de dispositivo USB.');
-              throw new Error('No se seleccionó ningún dispositivo USB.');
+
+            if (requested && requested.length > 0) {
+              const selected = requested[0];
+              const isScreen = selected.collections?.some((c: any) => c.usage === 2);
+              if (isScreen) {
+                this.screenDevice = selected;
+                logger.info('✓ Base con pantalla TFT seleccionada explícitamente.');
+              } else {
+                this.mouseDevice = selected;
+              }
             }
-            allDevices = requested;
+          } catch (e: any) {
+            if (!this.screenDevice && !this.mouseDevice) throw e;
           }
 
-          logger.info(`Se detectaron ${allDevices.length} interfaces autorizadas para el mouse.`);
-
-          // 2. Imprimir diagnósticos de cada colección para depuración
-          allDevices.forEach((d, idx) => {
-            const colInfo = d.collections
-              ?.map(
-                (c: any) =>
-                  `UsagePage=0x${c.usagePage.toString(16)} (${c.usagePage}), Usage=${c.usage}, Features=${c.featureReports?.length || 0}`
-              )
-              .join(' | ');
-            logger.info(`[Interfaz ${idx}] ${d.productName || 'HID'} -> ${colInfo}`);
-          });
-
-          // 3. Seleccionar ESTRÍCTAMENTE la interfaz Vendor: UsagePage 0xFFFF (65535) y Usage 2 (dangle_3950b)
-          targetDevice = allDevices.find((d) =>
+          const foundScreen = allDevices.find((d) =>
             d.collections?.some((c: any) => (c.usagePage === 65535 || c.usagePage === 0xFFFF) && c.usage === 2)
           );
-
-          // Si no, buscar cualquier colección con UsagePage 0xFFFF
-          if (!targetDevice) {
-            targetDevice = allDevices.find((d) =>
-              d.collections?.some((c: any) => c.usagePage === 65535 || c.usagePage === 0xFFFF || (c.usagePage >= 0xFF00 && c.usagePage <= 0xFFFF))
-            );
+          if (foundScreen) {
+            this.screenDevice = foundScreen;
+          } else if (!this.screenDevice && allDevices.length > 0) {
+            this.screenDevice = allDevices[0];
+            logger.warn('Advertencia: No se encontró la interfaz Usage: 2 (Base TFT). Si la pantalla no responde, pulsa "Cambiar / Re-vincular USB" y selecciona la otra interfaz.');
           }
 
-          // Si no, buscar la que tenga featureReports de 64 bytes
-          if (!targetDevice) {
-            targetDevice = allDevices.find((d) =>
-              d.collections?.some((c: any) => c.featureReports && c.featureReports.length > 0 && c.usagePage !== 1 && c.usagePage !== 12)
-            );
-          }
-
-          if (!targetDevice) {
-            targetDevice = allDevices[0];
-            logger.warn('No se encontró UsagePage 65535 explícito, usando interfaz fallback.');
+          const foundMouse = allDevices.find((d) =>
+            d.collections?.some((c: any) => (c.usagePage === 65535 || c.usagePage === 0xFFFF) && c.usage === 1)
+          );
+          if (foundMouse) {
+            this.mouseDevice = foundMouse;
+          } else if (!this.mouseDevice && allDevices.length > 0) {
+            this.mouseDevice = allDevices.find((d) => d !== this.screenDevice) || allDevices[0];
           }
         }
 
-        if (!targetDevice.opened) {
-          await targetDevice.open();
-          logger.info(`Dispositivo abierto: ${targetDevice.productName}`);
+        // Abrir interfaces
+        if (this.screenDevice && !this.screenDevice.opened) {
+          await this.screenDevice.open();
+          logger.info(`Base con pantalla abierta: ${this.screenDevice.productName}`);
+        }
+        if (this.mouseDevice && this.mouseDevice !== this.screenDevice && !this.mouseDevice.opened) {
+          await this.mouseDevice.open();
+          logger.info(`Controlador de mouse abierto: ${this.mouseDevice.productName}`);
         }
 
-        this.hidDevice = targetDevice;
-        this.detectReportId();
+        this.hidDevice = this.screenDevice || this.mouseDevice;
+        this.detectReportIds();
 
-        // 4. VERIFICACIÓN DIRECTA CON EL HARDWARE:
-        // Consultar versión de pantalla OLED con Opcode 0xAD para confirmar que este endpoint realmente controla la pantalla
+        // Diagnóstico en consola y logs
+        if (this.screenDevice) {
+          const cols = this.screenDevice.collections
+            ?.map((c: any) => `UsagePage=${c.usagePage}, Usage=${c.usage}`)
+            .join(' | ');
+          logger.info(`Canal de Pantalla TFT asignado a: ${cols} (ReportID: ${this.screenReportId})`);
+        }
+
+        // Verificación de hardware de pantalla
         await this.verifyHardwareConnection();
 
         return true;
@@ -163,14 +163,33 @@ class MouseProtocolService {
    */
   async verifyHardwareConnection(): Promise<ScreenHardwareInfo> {
     logger.tx('Verificando hardware de pantalla TFT (Opcode 0xAD - FEA_CMD_GETOLED_VERSION)...');
+    if (this.isTauri) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const info: any = await invoke('verify_screen_hardware');
+        this.screenInfo = {
+          verified: info.verified,
+          oledVersion: info.oled_version,
+          flashVersion: info.flash_version,
+          details: info.details,
+        };
+        logger.rx(`✓ Microcontrolador TFT verificado vía Rust! OLED: ${this.screenInfo.oledVersion}, Flash: ${this.screenInfo.flashVersion}`);
+        return this.screenInfo;
+      } catch (e: any) {
+        logger.warn(`Error verificando pantalla vía Tauri Rust: ${e?.message || e}`);
+        this.screenInfo = { verified: false, details: e?.message || String(e) };
+        return this.screenInfo;
+      }
+    }
+
     try {
       const probeBuf = new Uint8Array(64);
       probeBuf[0] = CMD_GETOLED_VERSION; // 0xAD (173)
 
-      await this.sendFeatureReport(probeBuf);
+      await this.sendFeatureReport(probeBuf, 'screen');
       await new Promise((r) => setTimeout(r, 40));
 
-      const resp = await this.readFeatureReport(CMD_GETOLED_VERSION);
+      const resp = await this.readFeatureReport(CMD_GETOLED_VERSION, 'screen');
       if (resp && resp.length >= 5) {
         // En algunos drivers el reporte recibido comienza directamente con el opcode 0xAD
         let offset = 0;
@@ -208,54 +227,60 @@ class MouseProtocolService {
     }
   }
 
-  private detectReportId() {
-    this.targetReportId = 0;
-    if (this.hidDevice?.collections) {
-      for (const col of this.hidDevice.collections) {
-        if (col.usagePage === 65535 || col.usagePage >= 0xff00) {
-          if (col.featureReports && col.featureReports.length > 0) {
-            const rep = col.featureReports[0];
-            if (typeof rep.reportId === 'number') {
-              this.targetReportId = rep.reportId;
-              logger.info(`Report ID vendor detectado: ${this.targetReportId}`);
-              return;
-            }
-          }
-        }
-      }
+  private detectReportIds() {
+    this.screenReportId = this.findVendorReportId(this.screenDevice);
+    this.mouseReportId = this.findVendorReportId(this.mouseDevice);
+    logger.info(`ReportIDs detectados -> Pantalla: ${this.screenReportId}, Mouse: ${this.mouseReportId}`);
+  }
 
-      for (const col of this.hidDevice.collections) {
+  private findVendorReportId(dev: any): number {
+    if (!dev?.collections) return 0;
+    for (const col of dev.collections) {
+      if (col.usagePage === 65535 || col.usagePage >= 0xff00) {
         if (col.featureReports && col.featureReports.length > 0) {
           const rep = col.featureReports[0];
           if (typeof rep.reportId === 'number') {
-            this.targetReportId = rep.reportId;
-            logger.info(`Report ID genérico detectado: ${this.targetReportId}`);
-            return;
+            return rep.reportId;
           }
         }
       }
     }
+    for (const col of dev.collections) {
+      if (col.featureReports && col.featureReports.length > 0) {
+        const rep = col.featureReports[0];
+        if (typeof rep.reportId === 'number') {
+          return rep.reportId;
+        }
+      }
+    }
+    return 0;
   }
 
   /**
-   * Lee un reporte Feature HID desde el dispositivo
+   * Lee un reporte Feature HID desde el dispositivo correspondiente (pantalla o mouse)
    */
-  async readFeatureReport(expectedReportId?: number): Promise<Uint8Array | null> {
+  async readFeatureReport(expectedReportId?: number, target: 'screen' | 'mouse' = 'screen'): Promise<Uint8Array | null> {
     if (this.isTauri) {
       return null;
     }
 
-    if (!this.hidDevice || !this.hidDevice.opened) {
+    const dev = target === 'screen' ? (this.screenDevice || this.hidDevice) : (this.mouseDevice || this.hidDevice);
+    if (!dev || !dev.opened) {
       return null;
     }
 
-    const repId = expectedReportId !== undefined ? expectedReportId : this.targetReportId;
+    const repId =
+      expectedReportId !== undefined
+        ? expectedReportId
+        : target === 'screen'
+        ? this.screenReportId
+        : this.mouseReportId;
 
     try {
-      const dataView: DataView = await this.hidDevice.receiveFeatureReport(repId);
+      const dataView: DataView = await dev.receiveFeatureReport(repId);
       const bytes = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
       logger.rx(
-        `Feature Report recibido (ID=${repId}, ${bytes.byteLength} bytes): [${Array.from(
+        `Feature Report recibido [${target}] (ID=${repId}, ${bytes.byteLength} bytes): [${Array.from(
           bytes.subarray(0, Math.min(10, bytes.byteLength))
         )
           .map((b) => '0x' + b.toString(16).padStart(2, '0'))
@@ -263,17 +288,15 @@ class MouseProtocolService {
       );
       return bytes;
     } catch (err: any) {
-      // Intentar con Report ID 0 si falló con un ID distinto
       if (repId !== 0) {
         try {
-          const dataView: DataView = await this.hidDevice.receiveFeatureReport(0);
-          const bytes = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
-          return bytes;
+          const dataView: DataView = await dev.receiveFeatureReport(0);
+          return new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
         } catch {
           // continuar
         }
       }
-      logger.warn(`No se pudo leer Feature Report (ID=${repId}): ${err?.message || err}`);
+      logger.warn(`No se pudo leer Feature Report [${target}] (ID=${repId}): ${err?.message || err}`);
       return null;
     }
   }
@@ -284,25 +307,30 @@ class MouseProtocolService {
 
   isConnected(): boolean {
     if (this.isTauri) return true;
-    return !!(this.hidDevice && this.hidDevice.opened);
+    return !!(this.screenDevice?.opened || this.mouseDevice?.opened || this.hidDevice?.opened);
   }
 
   getDeviceName(): string {
-    if (this.hidDevice) return this.hidDevice.productName || 'AJAZZ AJ159/AJ179 APEX';
+    if (this.screenDevice) return `${this.screenDevice.productName || 'AJAZZ APEX'} (Base)`;
+    if (this.mouseDevice) return `${this.mouseDevice.productName || 'AJAZZ APEX'} (Mouse)`;
     return 'AJAZZ AJ159/AJ179 APEX';
   }
 
   /**
-   * Envía un reporte Feature HID asegurando el tamaño exacto y probando fallback de reportId si es necesario
+   * Envía un reporte Feature HID asegurando el tamaño exacto al dispositivo adecuado
    */
-  private async sendFeatureReport(payload: Uint8Array): Promise<void> {
+  private async sendFeatureReport(payload: Uint8Array, target: 'screen' | 'mouse' = 'screen'): Promise<void> {
     if (this.isTauri) {
       return;
     }
 
-    if (!this.hidDevice || !this.hidDevice.opened) {
-      const ok = await this.connect();
-      if (!ok || !this.hidDevice) throw new Error('Dispositivo no conectado. Haz clic en "Conectar Mouse USB".');
+    let dev = target === 'screen' ? (this.screenDevice || this.hidDevice) : (this.mouseDevice || this.hidDevice);
+    let targetRepId = target === 'screen' ? this.screenReportId : this.mouseReportId;
+
+    if (!dev || !dev.opened) {
+      await this.connect();
+      dev = target === 'screen' ? (this.screenDevice || this.hidDevice) : (this.mouseDevice || this.hidDevice);
+      if (!dev) throw new Error('Dispositivo no conectado. Haz clic en "Conectar Mouse USB".');
     }
 
     let buf64: Uint8Array;
@@ -313,46 +341,29 @@ class MouseProtocolService {
       buf64.set(payload.subarray(0, Math.min(64, payload.byteLength)));
     }
 
-    // Probar con el targetReportId detectado
     try {
-      await this.hidDevice.sendFeatureReport(this.targetReportId, buf64);
+      await dev.sendFeatureReport(targetRepId, buf64);
       return;
     } catch (err1: any) {
-      logger.warn(`ReportID ${this.targetReportId} falló: ${err1?.message || err1}. Probando IDs alternativos...`);
+      logger.warn(`ReportID ${targetRepId} en [${target}] falló: ${err1?.message || err1}. Probando IDs alternativos...`);
 
-      // Intentar alternativas comunes (0, el primer byte como opcode, o 7)
-      const altIds = [0, buf64[0], 7, 1].filter((id) => id !== this.targetReportId);
-
+      const altIds = [0, buf64[0], 7, 1].filter((id) => id !== targetRepId);
       for (const altId of altIds) {
         try {
-          await this.hidDevice.sendFeatureReport(altId, buf64);
-          this.targetReportId = altId;
+          await dev.sendFeatureReport(altId, buf64);
+          if (target === 'screen') this.screenReportId = altId;
+          else this.mouseReportId = altId;
           logger.info(`Éxito enviando con Report ID alternativo ${altId}!`);
           return;
         } catch {
-          // continuar probando
+          // continuar
         }
       }
 
-      // Si falló en este dispositivo, intentar buscar entre las otras interfaces HID autorizadas
-      const allDevices: any[] = await (navigator as any).hid.getDevices();
-      for (const altDev of allDevices) {
-        if (altDev !== this.hidDevice && altDev.vendorId === VID_AJAZZ && altDev.productId === PID_AJAZZ_APEX) {
-          try {
-            if (!altDev.opened) await altDev.open();
-            await altDev.sendFeatureReport(0, buf64);
-            logger.info(`Éxito enviando a interfaz secundaria ${altDev.productName}!`);
-            this.hidDevice = altDev;
-            this.targetReportId = 0;
-            return;
-          } catch {
-            // continuar
-          }
-        }
-      }
-
-      logger.error('El microcontrolador rechazó el Feature Report en todas las interfaces.');
-      throw new Error(`Error USB HID: El microcontrolador rechazó el Feature Report. Asegúrate de conectar el mouse/base por cable USB directo (no a través de un hub sin energía).`);
+      logger.error(`El microcontrolador rechazó el Feature Report en [${target}].`);
+      throw new Error(
+        `Error USB HID: El microcontrolador rechazó el Feature Report en ${target}. Asegúrate de que la base magnética esté conectada directamente por cable USB.`
+      );
     }
   }
 
@@ -380,7 +391,7 @@ class MouseProtocolService {
     buf[13] = now.getMinutes();
     buf[14] = now.getSeconds();
 
-    await this.sendFeatureReport(buf);
+    await this.sendFeatureReport(buf, 'screen');
     logger.rx(`Reloj sincronizado: ${now.toLocaleTimeString()}`);
   }
 
@@ -408,7 +419,7 @@ class MouseProtocolService {
     buf0[16] = Math.min(20, debounceTime);
     buf0[50] = 100;
     buf0[51] = 100;
-    await this.sendFeatureReport(buf0);
+    await this.sendFeatureReport(buf0, 'mouse');
 
     await new Promise(r => setTimeout(r, 20));
 
@@ -429,7 +440,7 @@ class MouseProtocolService {
       buf1[42 + i * 3] = rgb.b;
     });
 
-    await this.sendFeatureReport(buf1);
+    await this.sendFeatureReport(buf1, 'mouse');
     logger.rx('Parámetros de DPI y sensor guardados en el dispositivo.');
   }
 
@@ -455,7 +466,7 @@ class MouseProtocolService {
     buf[5] = rgb.g;
     buf[6] = rgb.b;
 
-    await this.sendFeatureReport(buf);
+    await this.sendFeatureReport(buf, 'mouse');
     logger.rx('Efecto de iluminación aplicado.');
   }
 
@@ -468,6 +479,46 @@ class MouseProtocolService {
     imgElement: HTMLImageElement,
     onProgress: (percent: number, statusText?: string) => void
   ): Promise<void> {
+    if (this.isTauri) {
+      logger.tx('Iniciando carga de imagen mediante el controlador nativo Rust...');
+      onProgress(5, 'Procesando imagen con motor nativo Rust...');
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 128;
+      canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('No se pudo inicializar canvas 2D');
+
+      if (!imgElement.complete) {
+        await imgElement.decode().catch(() => {});
+      }
+
+      ctx.drawImage(imgElement, 0, 0, 128, 128);
+      const base64 = canvas.toDataURL('image/png');
+
+      const { invoke } = await import('@tauri-apps/api/core');
+      let unlisten = () => {};
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen('screen-upload-progress', (event: any) => {
+          if (event.payload) {
+            onProgress(event.payload.progress, event.payload.status);
+          }
+        });
+      } catch (e) {
+        logger.warn(`Suscripción a progreso omitida: ${e}`);
+      }
+
+      try {
+        await invoke('upload_image_to_screen', { imageBase64: base64 });
+        onProgress(100, '¡Imagen transferida con éxito!');
+        logger.rx('✓ Transferencia exitosa vía driver nativo Rust.');
+      } finally {
+        unlisten();
+      }
+      return;
+    }
+
     logger.tx('1/3 Procesando imagen: redimensionando a 128x128 y convirtiendo a RGB565...');
     onProgress(5, 'Convirtiendo imagen a formato 16-bit RGB565...');
 
@@ -477,28 +528,46 @@ class MouseProtocolService {
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('No se pudo inicializar canvas 2D');
 
+    if (!imgElement.complete) {
+      await imgElement.decode().catch(() => {});
+    }
+
     ctx.drawImage(imgElement, 0, 0, 128, 128);
     const imgData = ctx.getImageData(0, 0, 128, 128).data;
 
-    // Convertir a RGB565 (128x128x2 = 32,768 bytes) Little-Endian
+    // Convertir a RGB565 (128x128x2 = 32,768 bytes) en orden Column-Major y Big-Endian
+    // según la especificación de firmware ST7735/GC9A01 de la base magnética AJAZZ APEX
     const totalBytes = 128 * 128 * 2;
     const rawBytes = new Uint8Array(totalBytes);
     let byteIdx = 0;
-    for (let i = 0; i < imgData.length; i += 4) {
-      const r = imgData[i];
-      const g = imgData[i + 1];
-      const b = imgData[i + 2];
 
-      const r5 = (r >> 3) & 0x1f;
-      const g6 = (g >> 2) & 0x3f;
-      const b5 = (b >> 3) & 0x1f;
-      const rgb565 = (r5 << 11) | (g6 << 5) | b5;
+    for (let x = 0; x < 128; x++) {
+      for (let y = 0; y < 128; y++) {
+        const offset = (y * 128 + x) * 4;
+        const r = imgData[offset];
+        const g = imgData[offset + 1];
+        const b = imgData[offset + 2];
 
-      rawBytes[byteIdx++] = rgb565 & 0xff;
-      rawBytes[byteIdx++] = (rgb565 >> 8) & 0xff;
+        const r5 = (r >> 3) & 0x1f;
+        const g6 = (g >> 2) & 0x3f;
+        const b5 = (b >> 3) & 0x1f;
+        const rgb565 = (r5 << 11) | (g6 << 5) | b5;
+
+        // Big-Endian: Byte alto primero, luego byte bajo
+        rawBytes[byteIdx++] = (rgb565 >> 8) & 0xff;
+        rawBytes[byteIdx++] = rgb565 & 0xff;
+      }
     }
 
     onProgress(10, 'Enviando handshake de inicialización TFT (Opcode 0xA5)...');
+
+    const applyBit7Checksum = (buf: Uint8Array) => {
+      let sum = 0;
+      for (let i = 0; i < 7; i++) {
+        sum += buf[i];
+      }
+      buf[7] = 255 - (sum & 255);
+    };
 
     // 2. Handshake obligatorio según el protocolo oficial (FEA_CMD_GETTFTLCDDATA = 165 / 0xA5)
     logger.tx('2/3 Enviando handshake TFT (Opcode 0xA5, longitud 32768 bytes)...');
@@ -510,11 +579,11 @@ class MouseProtocolService {
     handshake[4] = totalBytes & 0xff;        // 0x00
     handshake[5] = (totalBytes >> 8) & 0xff; // 0x80 (32768 = 0x8000)
     handshake[6] = 0;
-    handshake[7] = 0;
+    applyBit7Checksum(handshake);
     handshake[8] = 0;   // left
     handshake[9] = 0;   // top
-    handshake[10] = 127;// right
-    handshake[11] = 127;// bottom
+    handshake[10] = 128;// right (ancho = 128)
+    handshake[11] = 128;// bottom (alto = 128)
     handshake[12] = 0;  // left >> 8
     handshake[13] = 0;  // top >> 8
     handshake[14] = 0;  // right >> 8
@@ -522,21 +591,19 @@ class MouseProtocolService {
     handshake[16] = (totalBytes >> 16) & 0xff;
     handshake[17] = (totalBytes >> 24) & 0xff;
 
-    await this.sendFeatureReport(handshake);
-
-    // 3. Verificación de ACK del microcontrolador (reintentos hasta 10 veces como el driver oficial)
+    // 3. Verificación de ACK del microcontrolador re-enviando el handshake en cada intento
     let ackOk = false;
     for (let attempt = 0; attempt < 10; attempt++) {
+      await this.sendFeatureReport(handshake, 'screen');
       await new Promise((r) => setTimeout(r, 100));
-      const ackResp = await this.readFeatureReport(CMD_GETTFTLCDDATA);
+      const ackResp = await this.readFeatureReport(CMD_GETTFTLCDDATA, 'screen');
       if (ackResp) {
-        // En el driver oficial: 1 === u[1]
         if (ackResp[1] === 1 || ackResp[0] === 1 || (ackResp[0] === CMD_GETTFTLCDDATA && ackResp[1] === 1)) {
           ackOk = true;
           logger.rx(`✓ ACK recibido del controlador TFT en intento ${attempt + 1}. Listo para recibir datos.`);
           break;
         } else if (ackResp[1] === 0) {
-          logger.info(`Microcontrolador ocupado (ACK=0), esperando intento ${attempt + 1}/10...`);
+          logger.info(`Microcontrolador procesando handshake (intento ${attempt + 1}/10)...`);
         }
       }
     }
@@ -562,11 +629,11 @@ class MouseProtocolService {
 
       const chunk = rawBytes.subarray(y * 56, (y + 1) * 56);
       packet[6] = chunk.length;    // longitud del chunk (56 o residuo)
-      packet[7] = 0;
+      applyBit7Checksum(packet);
 
       packet.set(chunk, 8); // Datos de píxeles en bytes 8..63
 
-      await this.sendFeatureReport(packet);
+      await this.sendFeatureReport(packet, 'screen');
 
       if (y % 15 === 0 || y === totalChunks - 1) {
         const pct = Math.min(99, Math.round((y / totalChunks) * 83) + 15);
