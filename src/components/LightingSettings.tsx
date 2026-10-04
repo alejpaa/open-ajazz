@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Sun, Sparkles, Check } from 'lucide-react';
+import { mouseService } from '../services/mouseProtocol';
 
 interface LightEffect {
   id: string;
@@ -32,19 +33,11 @@ export const LightingSettings: React.FC = () => {
 
   const handleApply = async () => {
     try {
-      if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('set_lighting_settings', {
-          effect: selectedEffect,
-          color,
-          brightness,
-          speed,
-        });
-      }
+      await mouseService.setLighting(selectedEffect, color, brightness, speed);
       setIsApplied(true);
       setTimeout(() => setIsApplied(false), 2000);
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      alert(`Error al aplicar iluminación: ${e?.message || e}`);
     }
   };
 
@@ -63,7 +56,7 @@ export const LightingSettings: React.FC = () => {
         </div>
         <button
           onClick={handleApply}
-          className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-lg text-sm transition shadow-lg shadow-indigo-600/20"
+          className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-lg text-sm transition shadow-lg shadow-indigo-600/20 cursor-pointer"
         >
           {isApplied ? <Check className="w-4 h-4 text-emerald-300" /> : <Sun className="w-4 h-4" />}
           {isApplied ? '¡Aplicado al Mouse!' : 'Aplicar Efecto'}
@@ -82,7 +75,7 @@ export const LightingSettings: React.FC = () => {
                 <button
                   key={eff.id}
                   onClick={() => setSelectedEffect(eff.id)}
-                  className={`p-3.5 rounded-xl border text-left transition flex flex-col justify-between h-24 ${
+                  className={`p-3.5 rounded-xl border text-left transition flex flex-col justify-between h-24 cursor-pointer ${
                     isSel
                       ? 'bg-indigo-950/40 border-indigo-500/80 text-white shadow-md ring-1 ring-indigo-500/30'
                       : 'bg-slate-950/40 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
@@ -109,7 +102,7 @@ export const LightingSettings: React.FC = () => {
         <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-6 space-y-5">
           <h3 className="text-sm font-semibold text-slate-200">Parámetros del Efecto</h3>
 
-          {/* Color selector si aplica */}
+          {/* Color selector */}
           {currentEffectConfig?.hasColor && (
             <div className="space-y-2.5">
               <label className="text-xs text-slate-400 flex items-center justify-between">
@@ -117,14 +110,13 @@ export const LightingSettings: React.FC = () => {
                 <span className="font-mono text-indigo-400 uppercase">{color}</span>
               </label>
 
-              {/* Color presets */}
               <div className="flex flex-wrap gap-2">
                 {PRESET_COLORS.map((c) => (
                   <button
                     key={c}
                     onClick={() => setColor(c)}
                     style={{ backgroundColor: c }}
-                    className={`w-7 h-7 rounded-lg border transition ${
+                    className={`w-7 h-7 rounded-lg border transition cursor-pointer ${
                       color.toLowerCase() === c.toLowerCase()
                         ? 'border-white scale-110 shadow-lg'
                         : 'border-transparent opacity-80 hover:opacity-100'

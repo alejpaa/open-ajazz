@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { Upload, Clock, Image as ImageIcon, Play, Pause, Trash2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { mouseService } from '../services/mouseProtocol';
 
 export const ScreenStudio: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -9,6 +10,7 @@ export const ScreenStudio: React.FC = () => {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -21,38 +23,31 @@ export const ScreenStudio: React.FC = () => {
   };
 
   const handleSyncClock = async () => {
-    setStatusMessage({ type: 'info', text: 'Sincronizando reloj de la pantalla...' });
+    setStatusMessage({ type: 'info', text: 'Sincronizando reloj de la pantalla con fecha y hora actual...' });
     try {
-      // Si Tauri está disponible invocamos el comando nativo
-      if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('sync_clock');
-      }
-      setTimeout(() => {
-        setStatusMessage({ type: 'success', text: '¡Reloj de la base sincronizado con éxito!' });
-      }, 500);
+      await mouseService.syncClock();
+      setStatusMessage({ type: 'success', text: '¡Reloj de la base sincronizado con éxito!' });
     } catch (err: any) {
       setStatusMessage({ type: 'error', text: `Error al sincronizar reloj: ${err?.message || err}` });
     }
   };
 
   const handleUploadScreen = async () => {
-    if (!selectedFile) return;
+    if (!selectedFile || !imgRef.current) return;
     setStatusMessage({ type: 'info', text: 'Iniciando transferencia a pantalla TFT 128x128...' });
-    setUploadProgress(0);
+    setUploadProgress(1);
 
-    // Simulación progresiva o llamada nativa en Tauri
-    let p = 0;
-    const interval = setInterval(() => {
-      p += 5;
-      if (p <= 100) {
-        setUploadProgress(p);
-      } else {
-        clearInterval(interval);
-        setUploadProgress(null);
-        setStatusMessage({ type: 'success', text: '¡Animación transferida con éxito a la pantalla!' });
-      }
-    }, 150);
+    try {
+      await mouseService.uploadImageToScreen(imgRef.current, (progress) => {
+        setUploadProgress(progress);
+      });
+
+      setUploadProgress(null);
+      setStatusMessage({ type: 'success', text: '¡Imagen transferida con éxito a la pantalla de la base!' });
+    } catch (err: any) {
+      setUploadProgress(null);
+      setStatusMessage({ type: 'error', text: `Error al transferir: ${err?.message || err}` });
+    }
   };
 
   const handleClear = () => {
@@ -74,12 +69,12 @@ export const ScreenStudio: React.FC = () => {
               Estudio de Pantalla TFT (128x128 Píxeles)
             </h2>
             <p className="text-sm text-slate-400 mt-1">
-              Personaliza la pantalla de la base magnética del mouse con animaciones GIF, imágenes o sincroniza la hora actual.
+              Personaliza la pantalla de la base magnética del mouse con imágenes, animaciones o sincroniza la hora actual.
             </p>
           </div>
           <button
             onClick={handleSyncClock}
-            className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-sm font-medium transition shadow-sm"
+            className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-sm font-medium transition shadow-sm cursor-pointer"
           >
             <Clock className="w-4 h-4 text-emerald-400" />
             Sincronizar Hora
@@ -88,20 +83,21 @@ export const ScreenStudio: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Preview & Canvas Zone */}
+        {/* Preview Zone */}
         <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-6 flex flex-col items-center justify-center min-h-[320px]">
           <span className="text-xs uppercase font-semibold text-slate-400 mb-3 tracking-wider">
             Previsualización en Pantalla (Escala Real)
           </span>
 
-          {/* Marco que simula la pantalla física del mouse/base */}
           <div className="relative w-44 h-44 rounded-2xl bg-black border-4 border-slate-700 flex items-center justify-center overflow-hidden shadow-2xl ring-2 ring-indigo-500/20">
             {previewUrl ? (
               <img
+                ref={imgRef}
                 src={previewUrl}
                 alt="Vista previa pantalla"
                 className="w-32 h-32 object-cover rounded shadow"
                 style={{ imageRendering: 'pixelated' }}
+                crossOrigin="anonymous"
               />
             ) : (
               <div className="flex flex-col items-center justify-center text-slate-600 gap-2">
@@ -109,8 +105,6 @@ export const ScreenStudio: React.FC = () => {
                 <span className="text-xs">Sin imagen activa</span>
               </div>
             )}
-
-            {/* Borde sutil que marca la resolución 128x128 */}
             <div className="absolute inset-0 pointer-events-none border border-white/5 rounded-xl" />
           </div>
 
@@ -120,14 +114,14 @@ export const ScreenStudio: React.FC = () => {
             <div className="flex items-center gap-3 mt-4">
               <button
                 onClick={() => setIsPlaying(!isPlaying)}
-                className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs flex items-center gap-1 transition"
+                className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs flex items-center gap-1 transition cursor-pointer"
               >
                 {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
                 {isPlaying ? 'Pausar' : 'Reproducir'}
               </button>
               <button
                 onClick={handleClear}
-                className="p-2 bg-red-950/40 hover:bg-red-900/60 text-red-300 border border-red-900/50 rounded-lg text-xs flex items-center gap-1 transition"
+                className="p-2 bg-red-950/40 hover:bg-red-900/60 text-red-300 border border-red-900/50 rounded-lg text-xs flex items-center gap-1 transition cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 Quitar
@@ -141,7 +135,6 @@ export const ScreenStudio: React.FC = () => {
           <div className="space-y-4">
             <h3 className="text-sm font-semibold text-slate-300">Cargar Imagen o GIF</h3>
 
-            {/* Drag & Drop Zone */}
             <div
               onClick={() => fileInputRef.current?.click()}
               className="border-2 border-dashed border-slate-700 hover:border-indigo-500/80 bg-slate-950/50 hover:bg-indigo-950/10 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition group"
@@ -149,7 +142,7 @@ export const ScreenStudio: React.FC = () => {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".gif,.png,.jpg,.jpeg"
+                accept=".gif,.png,.jpg,.jpeg,.webp"
                 onChange={handleFileChange}
                 className="hidden"
               />
@@ -158,7 +151,6 @@ export const ScreenStudio: React.FC = () => {
               <p className="text-xs text-slate-500 mt-1">Soporta GIFs animados, PNG y JPG (se ajustarán a 128x128)</p>
             </div>
 
-            {/* Ajustes de velocidad de frame */}
             <div className="space-y-2 pt-2">
               <div className="flex justify-between text-xs">
                 <span className="text-slate-400">Velocidad / Retardo entre frames:</span>
@@ -176,13 +168,12 @@ export const ScreenStudio: React.FC = () => {
             </div>
           </div>
 
-          {/* Progress Bar & Actions */}
           <div className="pt-6 space-y-4">
             {uploadProgress !== null && (
               <div className="space-y-1.5">
                 <div className="flex justify-between text-xs font-medium">
-                  <span className="text-indigo-400">Enviando paquetes HID...</span>
-                  <span className="text-slate-300">{uploadProgress}%</span>
+                  <span className="text-indigo-400">Enviando paquetes HID (RGB565)...</span>
+                  <span className="text-slate-300 font-mono">{uploadProgress}%</span>
                 </div>
                 <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
                   <div
@@ -215,7 +206,7 @@ export const ScreenStudio: React.FC = () => {
             <button
               onClick={handleUploadScreen}
               disabled={!selectedFile || uploadProgress !== null}
-              className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-medium rounded-lg text-sm transition shadow-lg shadow-indigo-600/20 disabled:shadow-none"
+              className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-medium rounded-lg text-sm transition shadow-lg shadow-indigo-600/20 disabled:shadow-none cursor-pointer"
             >
               Subir a la Pantalla del Mouse
             </button>

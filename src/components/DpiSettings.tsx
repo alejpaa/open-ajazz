@@ -1,14 +1,8 @@
 import React, { useState } from 'react';
 import { Sliders, Gauge, Zap, Check, Save } from 'lucide-react';
+import { mouseService, DpiStageConfig } from '../services/mouseProtocol';
 
-interface DpiStage {
-  id: number;
-  value: number;
-  color: string;
-  enabled: boolean;
-}
-
-const DEFAULT_STAGES: DpiStage[] = [
+const DEFAULT_STAGES: DpiStageConfig[] = [
   { id: 1, value: 400, color: '#ef4444', enabled: true },
   { id: 2, value: 800, color: '#3b82f6', enabled: true },
   { id: 3, value: 1200, color: '#10b981', enabled: true },
@@ -20,7 +14,7 @@ const DEFAULT_STAGES: DpiStage[] = [
 ];
 
 export const DpiSettings: React.FC = () => {
-  const [stages, setStages] = useState<DpiStage[]>(DEFAULT_STAGES);
+  const [stages, setStages] = useState<DpiStageConfig[]>(DEFAULT_STAGES);
   const [activeStageId, setActiveStageId] = useState<number>(3); // 1200 DPI por defecto
   const [pollingRate, setPollingRate] = useState<number>(1000); // 1000 Hz
   const [debounceTime, setDebounceTime] = useState<number>(4); // 4ms
@@ -44,19 +38,11 @@ export const DpiSettings: React.FC = () => {
 
   const handleSave = async () => {
     try {
-      if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('save_dpi_settings', {
-          activeStage: activeStageId,
-          pollingRate,
-          debounceTime,
-          stages: stages.filter((s) => s.enabled),
-        });
-      }
+      await mouseService.setDpi(activeStageId, stages, pollingRate, debounceTime);
       setIsSaved(true);
       setTimeout(() => setIsSaved(false), 2500);
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      alert(`Error al guardar configuración: ${e?.message || e}`);
     }
   };
 
@@ -75,7 +61,7 @@ export const DpiSettings: React.FC = () => {
         </div>
         <button
           onClick={handleSave}
-          className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-lg text-sm transition shadow-lg shadow-indigo-600/20"
+          className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-lg text-sm transition shadow-lg shadow-indigo-600/20 cursor-pointer"
         >
           {isSaved ? <Check className="w-4 h-4 text-emerald-300" /> : <Save className="w-4 h-4" />}
           {isSaved ? '¡Guardado en el Mouse!' : 'Guardar Cambios'}
@@ -104,7 +90,6 @@ export const DpiSettings: React.FC = () => {
                       : 'bg-slate-950/20 border-slate-900 opacity-40'
                   }`}
                 >
-                  {/* Radio / Active button */}
                   <button
                     onClick={() => setActiveStageId(stage.id)}
                     className="flex items-center gap-2 shrink-0 cursor-pointer"
@@ -119,7 +104,6 @@ export const DpiSettings: React.FC = () => {
                     <span className="text-xs font-semibold text-slate-300">Etapa {stage.id}</span>
                   </button>
 
-                  {/* Slider */}
                   <div className="flex-1 flex items-center gap-3">
                     <input
                       type="range"
@@ -144,7 +128,6 @@ export const DpiSettings: React.FC = () => {
                     <span className="text-xs text-slate-500 font-mono">DPI</span>
                   </div>
 
-                  {/* Color Picker */}
                   <div className="flex items-center gap-2 shrink-0">
                     <input
                       type="color"
@@ -155,10 +138,9 @@ export const DpiSettings: React.FC = () => {
                     />
                   </div>
 
-                  {/* Enable/Disable toggle */}
                   <button
                     onClick={() => handleToggleStage(stage.id)}
-                    className={`text-xs px-2 py-1 rounded transition shrink-0 ${
+                    className={`text-xs px-2 py-1 rounded transition shrink-0 cursor-pointer ${
                       stage.enabled
                         ? 'bg-slate-800 hover:bg-slate-700 text-slate-300'
                         : 'bg-slate-900 text-slate-600 hover:text-slate-400'
@@ -172,9 +154,8 @@ export const DpiSettings: React.FC = () => {
           </div>
         </div>
 
-        {/* Sensor & Hardware Settings (1 col) */}
+        {/* Sensor & Hardware Settings */}
         <div className="space-y-6">
-          {/* Polling rate card */}
           <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-5 space-y-3">
             <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
               <Gauge className="w-4 h-4 text-emerald-400" />
@@ -187,7 +168,7 @@ export const DpiSettings: React.FC = () => {
                 <button
                   key={rate}
                   onClick={() => setPollingRate(rate)}
-                  className={`py-2 px-3 rounded-lg text-xs font-mono font-medium border transition ${
+                  className={`py-2 px-3 rounded-lg text-xs font-mono font-medium border transition cursor-pointer ${
                     pollingRate === rate
                       ? 'bg-indigo-600/30 border-indigo-500 text-white shadow-sm'
                       : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
@@ -199,14 +180,12 @@ export const DpiSettings: React.FC = () => {
             </div>
           </div>
 
-          {/* Advanced Sensor Settings */}
           <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-5 space-y-4">
             <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
               <Zap className="w-4 h-4 text-amber-400" />
               Parámetros Avanzados del Sensor
             </h3>
 
-            {/* Debounce Time */}
             <div className="space-y-1.5">
               <div className="flex justify-between text-xs">
                 <span className="text-slate-400">Tiempo de rebote (Debounce Time):</span>
@@ -222,7 +201,6 @@ export const DpiSettings: React.FC = () => {
               />
             </div>
 
-            {/* Lift-off Distance */}
             <div className="space-y-1.5 pt-2">
               <div className="flex justify-between text-xs">
                 <span className="text-slate-400">Distancia de despegue (LOD):</span>
@@ -233,7 +211,7 @@ export const DpiSettings: React.FC = () => {
                   <button
                     key={l}
                     onClick={() => setLod(l)}
-                    className={`py-1.5 text-xs font-medium rounded-lg border transition ${
+                    className={`py-1.5 text-xs font-medium rounded-lg border transition cursor-pointer ${
                       lod === l
                         ? 'bg-indigo-600/30 border-indigo-500 text-white'
                         : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700'
@@ -245,12 +223,11 @@ export const DpiSettings: React.FC = () => {
               </div>
             </div>
 
-            {/* Smooth mode */}
             <div className="flex items-center justify-between pt-2 border-t border-slate-800">
               <span className="text-xs text-slate-300">Suavizado de sensor (Smooth):</span>
               <button
                 onClick={() => setSmoothMode(!smoothMode)}
-                className={`w-10 h-5 rounded-full transition relative p-0.5 ${
+                className={`w-10 h-5 rounded-full transition relative p-0.5 cursor-pointer ${
                   smoothMode ? 'bg-indigo-600' : 'bg-slate-800'
                 }`}
               >

@@ -1,12 +1,36 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { ScreenStudio } from './components/ScreenStudio';
 import { DpiSettings } from './components/DpiSettings';
 import { LightingSettings } from './components/LightingSettings';
 import { BatteryStatus } from './components/BatteryStatus';
-import { Mouse, Image as ImageIcon, Sliders, Sparkles, Battery, Circle } from 'lucide-react';
+import { mouseService } from './services/mouseProtocol';
+import { Mouse, Image as ImageIcon, Sliders, Sparkles, Battery, Circle, Unplug, Check } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'screen' | 'dpi' | 'lighting' | 'battery'>('screen');
+  const [isConnected, setIsConnected] = useState(false);
+  const [deviceName, setDeviceName] = useState('AJAZZ APEX');
+
+  const checkConnection = () => {
+    setIsConnected(mouseService.isConnected());
+    setDeviceName(mouseService.getDeviceName());
+  };
+
+  useEffect(() => {
+    checkConnection();
+  }, []);
+
+  const handleConnect = async () => {
+    try {
+      const ok = await mouseService.connect();
+      if (ok) {
+        setIsConnected(true);
+        setDeviceName(mouseService.getDeviceName());
+      }
+    } catch (e: any) {
+      alert(`No se pudo conectar al mouse: ${e?.message || e}`);
+    }
+  };
 
   return (
     <div className="flex h-screen w-screen bg-slate-950 text-slate-100 overflow-hidden font-sans">
@@ -29,29 +53,42 @@ export default function App() {
             </div>
           </div>
 
-          {/* Device Status Card */}
-          <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3 space-y-2">
+          {/* Device Status Card & Connect Button */}
+          <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3 space-y-2.5">
             <div className="flex items-center justify-between text-xs">
               <span className="text-slate-400">Dispositivo:</span>
-              <span className="flex items-center gap-1.5 text-emerald-400 font-medium">
-                <Circle className="w-2 h-2 fill-emerald-400 text-emerald-400" />
-                Conectado
+              <span className={`flex items-center gap-1.5 font-medium ${isConnected ? 'text-emerald-400' : 'text-amber-400'}`}>
+                <Circle className={`w-2 h-2 ${isConnected ? 'fill-emerald-400 text-emerald-400' : 'fill-amber-400 text-amber-400'}`} />
+                {isConnected ? 'Conectado' : 'Sin vincular'}
               </span>
             </div>
             <div className="text-xs font-semibold text-slate-200 truncate">
-              AJAZZ AJ159 / AJ179 APEX
+              {deviceName}
             </div>
-            <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-800/60 font-mono">
-              <span>VID: 0x3151</span>
-              <span>PID: 0x5007</span>
-            </div>
+
+            {!isConnected ? (
+              <button
+                onClick={handleConnect}
+                className="w-full py-1.5 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition shadow cursor-pointer"
+              >
+                <Unplug className="w-3.5 h-3.5" />
+                Conectar Mouse USB
+              </button>
+            ) : (
+              <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-800/60 font-mono">
+                <span className="text-emerald-400 flex items-center gap-1">
+                  <Check className="w-3 h-3" /> HID Activo
+                </span>
+                <span>3151:5007</span>
+              </div>
+            )}
           </div>
 
           {/* Navigation Links */}
           <nav className="space-y-1.5">
             <button
               onClick={() => setActiveTab('screen')}
-              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition ${
+              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition cursor-pointer ${
                 activeTab === 'screen'
                   ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/25'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
@@ -63,7 +100,7 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('dpi')}
-              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition ${
+              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition cursor-pointer ${
                 activeTab === 'dpi'
                   ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/25'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
@@ -75,7 +112,7 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('lighting')}
-              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition ${
+              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition cursor-pointer ${
                 activeTab === 'lighting'
                   ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/25'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
@@ -87,7 +124,7 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('battery')}
-              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition ${
+              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition cursor-pointer ${
                 activeTab === 'battery'
                   ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/25'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
@@ -101,7 +138,7 @@ export default function App() {
 
         {/* Footer info */}
         <div className="pt-4 border-t border-slate-800 text-[11px] text-slate-500 text-center">
-          Open Source • macOS & Linux Ready
+          Open Source • WebHID & Tauri Ready
         </div>
       </aside>
 
