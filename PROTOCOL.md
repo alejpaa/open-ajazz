@@ -53,41 +53,44 @@ Byte 15..63: 0x00 (Relleno)
 ### 2.3. Carga de Imágenes y Animaciones GIF
 
 #### Paso 1: Handshake de Inicialización (`FEA_CMD_GETTFTLCDDATA = 0xA5 / 165`)
-Antes de transferir datos de imagen, se envía un paquete descriptor con las dimensiones y tamaño de buffer:
+Antes de transferir datos de imagen o animación, se envía un paquete descriptor con las dimensiones, conteo de fotogramas y velocidad:
 ```text
 Byte 0:  0xA5 (165 decimal)
-Byte 1:  Índice de frame actual (currentFrame, ej. 0)
-Byte 2:  Cantidad total de frames (frameNum, ej. 1)
-Byte 3:  Retardo entre frames en ms (frameDelay, ej. 0)
-Byte 4..7: Tamaño total de datos en bytes (UInt32 Little-Endian: 128*128*2 = 32,768 = 0x00, 0x80, 0x00, 0x00)
+Byte 1:  Índice de frame inicial (currentFrame = 0)
+Byte 2:  Cantidad total de frames (frameNum: 1 para imagen fija, 2..60 para GIF)
+Byte 3:  Retardo entre frames en ms (frameDelay: 0 para estático, 20..200 para GIF)
+Byte 4..5: Longitud de 1 frame en bytes (UInt16LE: 128*128*2 = 32,768 = 0x00, 0x80)
+Byte 6:  0x00
+Byte 7:  Checksum de Hardware (BIT7): 255 - ((sum(packet[0..6])) & 255)
 Byte 8:  Left & 0xFF (0)
 Byte 9:  Top & 0xFF (0)
-Byte 10: Right & 0xFF (127)
-Byte 11: Bottom & 0xFF (127)
+Byte 10: Right & 0xFF (128 = 0x80)
+Byte 11: Bottom & 0xFF (128 = 0x80)
 Byte 12..15: Coordenadas extendidas (High bytes: left >> 8, top >> 8, etc.)
-Byte 16..17: Byte 2 y Byte 3 de longitud UInt32
+Byte 16..17: Longitud extendida (Bytes 2 y 3 de UInt32 = 0x00, 0x00)
 Byte 18..63: 0x00 (Relleno)
 ```
 **Respuesta del Microcontrolador:**
-El dispositivo debe retornar un Feature Report donde `resp[1] == 1` (ACK concedido). Si `resp[1] == 0`, el micro está ocupado y el driver oficial reintenta hasta 10 veces cada 100 ms.
+El dispositivo retorna un Feature Report donde `resp[1] == 1` (ACK concedido). Si `resp[1] == 0`, el microcontrolador está ocupado o validando el buffer y se reintenta hasta 10 veces cada 100 ms.
 
 #### Paso 2: Fragmentación de Fotogramas en Paquetes USB (`FEA_CMD_SETTFTLCDDATA = 0x25 / 37`)
-Cada fotograma se redimensiona a 128x128 píxeles y se convierte a formato **RGB565** (2 bytes por píxel = 32,768 bytes por frame).
-Los datos se dividen en fragmentos de **56 bytes**:
+Cada fotograma se escala a 128x128 píxeles y se codifica en orden **Column-Major Big-Endian RGB565** (2 bytes por píxel = 32,768 bytes por frame):
 * Paquetes por frame = $\lceil 32768 / 56 \rceil = 586$ paquetes.
-
-Estructura de cada paquete de 64 bytes enviada a la interfaz Vendor (`UsagePage: 0xFFFF, Usage: 2`):
+* Si es un GIF animado, se itera secuencialmente por cada frame `f` desde `0` hasta `frameNum - 1`.
+* En cada paquete de 64 bytes enviado a la interfaz Vendor (`UsagePage: 0xFFFF, Usage: 2`):
 ```text
-Byte 0: 0x25 (37 decimal)
-Byte 1: currentFrame (0)
-Byte 2: frameNum (1)
-Byte 3: frameDelay (0)
-Byte 4: Byte bajo de índice de chunk (y & 0xFF)
-Byte 5: Byte alto de índice de chunk ((y >> 8) & 0xFF)
-Byte 6: Longitud del chunk (hasta 56 bytes)
-Byte 7: 0x00 (Relleno)
+Byte 0: 0x25 (37 decimal - FEA_CMD_SETTFTLCDDATA)
+Byte 1: currentFrame (Índice del frame actual: 0, 1, ..., frameNum - 1)
+Byte 2: frameNum (Total de fotogramas)
+Byte 3: frameDelay (Retardo entre fotogramas en ms)
+Byte 4: Byte bajo de índice de chunk (c & 0xFF, rango 0..585)
+Byte 5: Byte alto de índice de chunk ((c >> 8) & 0xFF)
+Byte 6: Longitud del chunk útil (hasta 56 bytes)
+Byte 7: Checksum de Hardware (BIT7): 255 - ((sum(packet[0..6])) & 255)
 Byte 8..63: 56 bytes de datos de píxeles (RGB565)
 ```
+* **Retardos de bus:** Pausa de 2 ms entre paquetes y de 20 ms entre fotogramas consecutivos para garantizar la escritura en la memoria Flash SPI del dock.
+
 
 ---
 
