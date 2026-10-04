@@ -12,16 +12,24 @@ dist
 dist-ssr
 *.local
 
-# Tauri build artifacts
+# Tauri build artifacts & generated schemas
 src-tauri/target
+src-tauri/gen
+
+# Reverse engineering bundles & dumps
+qmk_bundle.js
+*.dump
+*.bin
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
