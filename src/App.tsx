@@ -23,13 +23,17 @@ export default function App() {
     return logger.subscribe(setLogs);
   }, []);
 
-  const handleConnect = async () => {
+  const handleConnect = async (forcePrompt: boolean = false) => {
     try {
-      const ok = await mouseService.connect();
+      const ok = await mouseService.connect(forcePrompt);
       if (ok) {
         setIsConnected(true);
         setDeviceName(mouseService.getDeviceName());
-        errorManager.showSuccess('Mouse Conectado', 'Enlace USB HID establecido con el mouse AJAZZ APEX.');
+        const sInfo = mouseService.getScreenInfo();
+        const extra = sInfo.verified
+          ? `Pantalla TFT verificada (OLED: ${sInfo.oledVersion}, Flash: ${sInfo.flashVersion})`
+          : 'Enlace USB HID establecido.';
+        errorManager.showSuccess('Mouse Conectado', extra);
       }
     } catch (e: any) {
       errorManager.handle(e, 'Emparejamiento inicial USB');
@@ -82,18 +86,28 @@ export default function App() {
 
             {!isConnected ? (
               <button
-                onClick={handleConnect}
+                onClick={() => handleConnect(false)}
                 className="w-full py-1.5 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition shadow cursor-pointer"
               >
                 <Unplug className="w-3.5 h-3.5" />
                 Conectar Mouse USB
               </button>
             ) : (
-              <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-800/60 font-mono">
-                <span className="text-emerald-400 flex items-center gap-1">
-                  <Check className="w-3 h-3" /> HID Activo
-                </span>
-                <span>3151:5007</span>
+              <div className="space-y-1.5 pt-1 border-t border-slate-800/60 font-mono">
+                <div className="flex items-center justify-between text-[11px] text-slate-400">
+                  <span className="text-emerald-400 flex items-center gap-1">
+                    <Check className="w-3 h-3" /> HID Activo
+                  </span>
+                  <span>3151:5007</span>
+                </div>
+                <button
+                  onClick={() => handleConnect(true)}
+                  className="w-full py-1 px-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px] font-sans transition flex items-center justify-center gap-1 cursor-pointer"
+                  title="Abre la ventana del navegador para volver a seleccionar el dispositivo USB"
+                >
+                  <Unplug className="w-3 h-3 text-slate-400" />
+                  Cambiar / Re-vincular USB
+                </button>
               </div>
             )}
           </div>

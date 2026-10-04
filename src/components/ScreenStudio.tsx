@@ -1,6 +1,6 @@
-import React, { useState, useRef } from 'react';
-import { Upload, Clock, Image as ImageIcon, Play, Pause, Trash2 } from 'lucide-react';
-import { mouseService } from '../services/mouseProtocol';
+import React, { useState, useRef, useEffect } from 'react';
+import { Upload, Clock, Image as ImageIcon, Play, Pause, Trash2, CheckCircle2, Cpu } from 'lucide-react';
+import { mouseService, ScreenHardwareInfo } from '../services/mouseProtocol';
 import { errorManager } from '../services/errorHandler';
 
 export const ScreenStudio: React.FC = () => {
@@ -9,8 +9,33 @@ export const ScreenStudio: React.FC = () => {
   const [isPlaying, setIsPlaying] = useState(true);
   const [frameDelay, setFrameDelay] = useState(60); // ms
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [uploadStatusText, setUploadStatusText] = useState<string>('');
+  const [screenInfo, setScreenInfo] = useState<ScreenHardwareInfo>(mouseService.getScreenInfo());
+  const [isVerifying, setIsVerifying] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
+
+  useEffect(() => {
+    setScreenInfo(mouseService.getScreenInfo());
+  }, []);
+
+  const handleVerifyScreen = async () => {
+    setIsVerifying(true);
+    try {
+      const info = await mouseService.verifyHardwareConnection();
+      setScreenInfo(info);
+      if (info.verified) {
+        errorManager.showSuccess(
+          'Pantalla TFT Verificada',
+          `Controlador OLED y memoria Flash confirmados por hardware (OLED: ${info.oledVersion || 'OK'}, Flash: ${info.flashVersion || 'OK'}).`
+        );
+      }
+    } catch (e: any) {
+      errorManager.handle(e, 'Verificación de pantalla TFT');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -34,16 +59,20 @@ export const ScreenStudio: React.FC = () => {
   const handleUploadScreen = async () => {
     if (!selectedFile || !imgRef.current) return;
     setUploadProgress(1);
+    setUploadStatusText('Iniciando transferencia...');
 
     try {
-      await mouseService.uploadImageToScreen(imgRef.current, (progress) => {
+      await mouseService.uploadImageToScreen(imgRef.current, (progress, statusText) => {
         setUploadProgress(progress);
+        if (statusText) setUploadStatusText(statusText);
       });
 
       setUploadProgress(null);
+      setUploadStatusText('');
       errorManager.showSuccess('Transferencia Completada', 'La imagen se envió exitosamente a la pantalla TFT del mouse.');
     } catch (err: any) {
       setUploadProgress(null);
+      setUploadStatusText('');
       errorManager.handle(err, 'Carga de imagen a pantalla TFT 128x128');
     }
   };
@@ -58,8 +87,8 @@ export const ScreenStudio: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Header card */}
-      <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-5 shadow-lg backdrop-blur">
-        <div className="flex items-center justify-between">
+      <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-5 shadow-lg backdrop-blur space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h2 className="text-xl font-bold text-white flex items-center gap-2">
               <ImageIcon className="w-6 h-6 text-indigo-400" />
@@ -69,13 +98,41 @@ export const ScreenStudio: React.FC = () => {
               Personaliza la pantalla de la base magnética del mouse con imágenes, animaciones o sincroniza la hora actual.
             </p>
           </div>
-          <button
-            onClick={handleSyncClock}
-            className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-sm font-medium transition shadow-sm cursor-pointer"
-          >
-            <Clock className="w-4 h-4 text-emerald-400" />
-            Sincronizar Hora
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleVerifyScreen}
+              disabled={isVerifying}
+              className="flex items-center gap-2 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium transition shadow-sm cursor-pointer disabled:opacity-50"
+              title="Envía Opcode 0xAD para consultar firmware del controlador TFT"
+            >
+              <Cpu className={`w-3.5 h-3.5 text-indigo-400 ${isVerifying ? 'animate-spin' : ''}`} />
+              {isVerifying ? 'Probando...' : 'Verificar Chip TFT'}
+            </button>
+            <button
+              onClick={handleSyncClock}
+              className="flex items-center gap-2 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium transition shadow-sm cursor-pointer"
+            >
+              <Clock className="w-3.5 h-3.5 text-emerald-400" />
+              Sincronizar Hora
+            </button>
+          </div>
+        </div>
+
+        {/* Hardware Status Strip */}
+        <div className="flex items-center gap-3 pt-2 border-t border-slate-800/60 text-xs">
+          <span className="text-slate-500 flex items-center gap-1 font-mono">
+            <CheckCircle2 className={`w-3.5 h-3.5 ${screenInfo.verified ? 'text-emerald-400' : 'text-slate-600'}`} />
+            Estado Pantalla:
+          </span>
+          {screenInfo.verified ? (
+            <span className="text-emerald-400 font-medium">
+              Controlador Verificado (OLED: {screenInfo.oledVersion || 'OK'} | Flash: {screenInfo.flashVersion || 'OK'})
+            </span>
+          ) : (
+            <span className="text-amber-400/90 font-medium">
+              Sin verificación de respuesta de chip TFT (Haz clic en "Verificar Chip TFT" o conecta el mouse)
+            </span>
+          )}
         </div>
       </div>
 
@@ -169,7 +226,9 @@ export const ScreenStudio: React.FC = () => {
             {uploadProgress !== null && (
               <div className="space-y-1.5">
                 <div className="flex justify-between text-xs font-medium">
-                  <span className="text-indigo-400">Enviando paquetes HID (RGB565)...</span>
+                  <span className="text-indigo-400 truncate max-w-[80%]">
+                    {uploadStatusText || 'Enviando paquetes HID (RGB565)...'}
+                  </span>
                   <span className="text-slate-300 font-mono">{uploadProgress}%</span>
                 </div>
                 <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">

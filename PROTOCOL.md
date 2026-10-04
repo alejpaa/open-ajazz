@@ -24,11 +24,11 @@ La base magnética cuenta con una pantalla TFT de 128x128 píxeles con soporte p
 | Comando | Valor Hex | Valor Dec | Descripción |
 | :--- | :--- | :--- | :--- |
 | `FEA_CMD_SET_OLEDCLOCK` | `0x28` | `40` | Sincroniza la fecha y la hora del sistema en la pantalla. |
-| `FEA_CMD_SET_OLEDGIFDATA` | `0x24` | `36` | Envía bloques de datos de un fotograma GIF o imagen. |
-| `FEA_CMD_GETTFTLCDDATA` | `0x25` | `37` | Handshake de preparación para datos de pantalla (16-bit RGB565). |
-| `FEA_CMD_SETTFTLCDDATA` | `0x25` | `37` | Envío de paquetes de datos RGB565. |
-| `FEA_CMD_SET_FLASHCHIPERASSE`| `0xAC` | `172` | Borra la memoria flash de la pantalla antes de escribir una animación nueva. |
-| `FEA_CMD_GETOLED_VERSION` | `0xAD` | `173` | Lee la versión del controlador de pantalla y la memoria flash. |
+| `FEA_CMD_SET_OLEDGIFDATA` | `0x24` | `36` | Envía bloques de datos de un fotograma GIF o animación. |
+| `FEA_CMD_SETTFTLCDDATA` | `0x25` | `37` | Envío de paquetes de datos RGB565 (56 bytes por bloque). |
+| `FEA_CMD_GETTFTLCDDATA` | `0xA5` | `165` | Handshake de preparación para datos de pantalla (16-bit RGB565). Requiere ACK `resp[1] == 1`. |
+| `FEA_CMD_SET_FLASHCHIPERASSE`| `0xAC` | `172` | Borra la memoria flash de la pantalla antes de escribir una animación nueva. Responde `[0xAC, 0xAA, 0xAA, 0x55, 0x55]`. |
+| `FEA_CMD_GETOLED_VERSION` | `0xAD` | `173` | Lee la versión del controlador de pantalla y la memoria flash (`resp[2]<<8 | resp[1]`). |
 
 ---
 
@@ -52,35 +52,40 @@ Byte 15..63: 0x00 (Relleno)
 
 ### 2.3. Carga de Imágenes y Animaciones GIF
 
-#### Paso 1: Handshake de Inicialización (`0x25`)
-Antes de transferir fotogramas, se envía un paquete descriptor con las dimensiones y metadatos:
+#### Paso 1: Handshake de Inicialización (`FEA_CMD_GETTFTLCDDATA = 0xA5 / 165`)
+Antes de transferir datos de imagen, se envía un paquete descriptor con las dimensiones y tamaño de buffer:
 ```text
-Byte 0:  0x25
-Byte 1:  Índice de frame actual (currentFrame)
-Byte 2:  Cantidad total de frames (totalFrames)
-Byte 3:  Retardo entre frames en ms (frameDelay)
-Byte 4..7: Tamaño total de datos en bytes (UInt32 Little-Endian: width * height * 2)
-Byte 8:  Left & 0xFF (0 para pantalla completa de 128x128)
+Byte 0:  0xA5 (165 decimal)
+Byte 1:  Índice de frame actual (currentFrame, ej. 0)
+Byte 2:  Cantidad total de frames (frameNum, ej. 1)
+Byte 3:  Retardo entre frames en ms (frameDelay, ej. 0)
+Byte 4..7: Tamaño total de datos en bytes (UInt32 Little-Endian: 128*128*2 = 32,768 = 0x00, 0x80, 0x00, 0x00)
+Byte 8:  Left & 0xFF (0)
 Byte 9:  Top & 0xFF (0)
-Byte 10: Right & 0xFF (127 & 0xFF = 127)
-Byte 11: Bottom & 0xFF (127 & 0xFF = 127)
+Byte 10: Right & 0xFF (127)
+Byte 11: Bottom & 0xFF (127)
 Byte 12..15: Coordenadas extendidas (High bytes: left >> 8, top >> 8, etc.)
+Byte 16..17: Byte 2 y Byte 3 de longitud UInt32
+Byte 18..63: 0x00 (Relleno)
 ```
+**Respuesta del Microcontrolador:**
+El dispositivo debe retornar un Feature Report donde `resp[1] == 1` (ACK concedido). Si `resp[1] == 0`, el micro está ocupado y el driver oficial reintenta hasta 10 veces cada 100 ms.
 
-#### Paso 2: Fragmentación de Fotogramas en Paquetes USB
+#### Paso 2: Fragmentación de Fotogramas en Paquetes USB (`FEA_CMD_SETTFTLCDDATA = 0x25 / 37`)
 Cada fotograma se redimensiona a 128x128 píxeles y se convierte a formato **RGB565** (2 bytes por píxel = 32,768 bytes por frame).
 Los datos se dividen en fragmentos de **56 bytes**:
 * Paquetes por frame = $\lceil 32768 / 56 \rceil = 586$ paquetes.
 
-Estructura de cada paquete de 64 bytes:
+Estructura de cada paquete de 64 bytes enviada a la interfaz Vendor (`UsagePage: 0xFFFF, Usage: 2`):
 ```text
-Byte 0: 0x24 (o 0x25)
-Byte 1: Si es GIF: (totalFrames - 1), si es estático: 0
-Byte 2: Número de paquete / índice de bloque (y)
-Byte 3: Frame actual (currentFrame)
-Byte 4: Retardo de frame (frameDelay)
-Byte 5: Capa de pantalla (layer, por defecto 1)
-Byte 6..7: UInt16LE con el número de paquete (y)
+Byte 0: 0x25 (37 decimal)
+Byte 1: currentFrame (0)
+Byte 2: frameNum (1)
+Byte 3: frameDelay (0)
+Byte 4: Byte bajo de índice de chunk (y & 0xFF)
+Byte 5: Byte alto de índice de chunk ((y >> 8) & 0xFF)
+Byte 6: Longitud del chunk (hasta 56 bytes)
+Byte 7: 0x00 (Relleno)
 Byte 8..63: 56 bytes de datos de píxeles (RGB565)
 ```
 
