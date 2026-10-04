@@ -28,10 +28,11 @@ fn erase_flash_memory() -> Result<bool, String> {
 async fn upload_image_to_screen(
     app: tauri::AppHandle,
     image_base64: String,
+    frame_delay: Option<u32>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let dev = AjazzMouseDevice::open_dock()?;
-        AjazzMouseDevice::upload_base64_image(&dev, &image_base64, |pct, status| {
+        AjazzMouseDevice::upload_base64_image(&dev, &image_base64, frame_delay, |pct, status| {
             let _ = app.emit(
                 "screen-upload-progress",
                 serde_json::json!({
@@ -40,7 +41,7 @@ async fn upload_image_to_screen(
                 }),
             );
         })?;
-        Ok("¡Imagen transferida con éxito a la pantalla TFT!".into())
+        Ok("¡Transferencia a pantalla TFT completada con éxito!".into())
     })
     .await
     .map_err(|e| format!("Error de ejecución: {}", e))?

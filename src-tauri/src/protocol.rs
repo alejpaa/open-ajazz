@@ -1,16 +1,20 @@
 use base64::prelude::*;
 use chrono::{Datelike, Local, Timelike};
 use hidapi::{HidApi, HidDevice};
-use image::GenericImageView;
+use image::codecs::gif::GifDecoder;
+use image::{AnimationDecoder, GenericImageView};
 use serde::{Deserialize, Serialize};
+use std::io::Cursor;
 
 pub const VID_AJAZZ: u16 = 0x3151; // 12625
 pub const PID_AJAZZ_APEX: u16 = 0x5007; // 20487
 
-// Opcodes del protocolo reverso de AJAZZ APEX
+#[allow(dead_code)]
 pub const CMD_SET_REPORT: u8 = 0x01;
+#[allow(dead_code)]
 pub const CMD_SET_PROFILE: u8 = 0x02;
 pub const CMD_SET_LEDPARAM: u8 = 0x04;
+#[allow(dead_code)]
 pub const CMD_SET_OLEDGIFDATA: u8 = 0x24; // 36
 pub const CMD_SETTFTLCDDATA: u8 = 0x25;   // 37
 pub const CMD_SET_OLEDCLOCK: u8 = 0x28;   // 40
@@ -20,6 +24,7 @@ pub const CMD_GET_BATTERY: u8 = 0x83;    // 131
 pub const CMD_GETTFTLCDDATA: u8 = 0xA5;   // 165
 pub const CMD_SET_FLASHCHIPERASE: u8 = 0xAC; // 172
 pub const CMD_GETOLED_VERSION: u8 = 0xAD;    // 173
+
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DpiStageConfig {
@@ -241,56 +246,142 @@ impl AjazzMouseDevice {
         Self::send_feature(device, &buf)
     }
 
-    /// Carga una imagen (en bytes decodificados o base64) y la transfiere a la pantalla TFT 128x128
+    /// Carga una imagen o animación GIF y la transfiere fotograma por fotograma a la pantalla TFT 128x128
     pub fn upload_image_data<F>(
         device: &HidDevice,
         image_bytes: &[u8],
+        custom_delay_ms: Option<u32>,
         progress_cb: F,
     ) -> Result<(), String>
     where
         F: Fn(u32, &str),
     {
-        progress_cb(5, "Decodificando y redimensionando imagen a 128x128...");
+        progress_cb(2, "Analizando y decodificando archivo de imagen/GIF...");
 
-        let dynamic_img = image::load_from_memory(image_bytes)
-            .map_err(|e| format!("Error procesando formato de imagen: {}", e))?;
+        let mut processed_frames: Vec<Vec<u8>> = Vec::new();
+        let frame_delay: u8;
 
-        // Redimensionar exactamente a 128x128 con filtro Lanczos3 de alta calidad
-        let resized = dynamic_img.resize_exact(128, 128, image::imageops::FilterType::Lanczos3);
+        // Detectar si el archivo es un GIF animado
 
-        // Convertir a RGB565 (128x128x2 = 32,768 bytes) en orden Column-Major y Big-Endian
-        // según las especificaciones del microcontrolador ST7735 de la base AJAZZ APEX
-        let mut raw_bytes = Vec::with_capacity(128 * 128 * 2);
-        for x in 0..128 {
-            for y in 0..128 {
-                let pixel = resized.get_pixel(x, y);
-                let r = pixel[0];
-                let g = pixel[1];
-                let b = pixel[2];
+        if image_bytes.starts_with(b"GIF87a") || image_bytes.starts_with(b"GIF89a") {
+            let cursor = Cursor::new(image_bytes);
+            let decoder = GifDecoder::new(cursor)
+                .map_err(|e| format!("Error abriendo archivo GIF: {}", e))?;
+            let raw_frames = decoder
+                .into_frames()
+                .collect_frames()
+                .map_err(|e| format!("Error decodificando fotogramas del GIF: {}", e))?;
 
-                let r5 = ((r >> 3) & 0x1f) as u16;
-                let g6 = ((g >> 2) & 0x3f) as u16;
-                let b5 = ((b >> 3) & 0x1f) as u16;
-                let rgb565 = (r5 << 11) | (g6 << 5) | b5;
-
-                // Big-Endian: byte alto primero
-                raw_bytes.push(((rgb565 >> 8) & 0xff) as u8);
-                raw_bytes.push((rgb565 & 0xff) as u8);
+            if raw_frames.is_empty() {
+                return Err("El archivo GIF no contiene ningún fotograma válido.".into());
             }
+
+            // Determinar delay de reproducción en milisegundos
+            if let Some(delay) = custom_delay_ms {
+                frame_delay = delay.clamp(10, 255) as u8;
+            } else {
+                let (num, denom) = raw_frames[0].delay().numer_denom_ms();
+                let detected = if denom > 0 { num / denom } else { 60 };
+                frame_delay = detected.clamp(10, 255) as u8;
+            }
+
+            // Límite de seguridad: máximo 60 fotogramas para proteger la memoria Flash del dock
+            let max_frames = 60;
+            let orig_count = raw_frames.len();
+            let frames_to_process: Vec<_> = if orig_count > max_frames {
+                let step = (orig_count as f32 / max_frames as f32).ceil() as usize;
+                progress_cb(
+                    4,
+                    &format!(
+                        "Optimizando GIF de {} a {} fotogramas para memoria Flash...",
+                        orig_count,
+                        (orig_count + step - 1) / step
+                    ),
+                );
+                raw_frames.into_iter().step_by(step).collect()
+            } else {
+                raw_frames
+            };
+
+            for (idx, frame) in frames_to_process.iter().enumerate() {
+                let buffer = frame.buffer();
+                let resized = image::imageops::resize(
+                    buffer,
+                    128,
+                    128,
+                    image::imageops::FilterType::Triangle,
+                );
+
+                let mut raw_bytes = Vec::with_capacity(128 * 128 * 2);
+                for x in 0..128 {
+                    for y in 0..128 {
+                        let pixel = resized.get_pixel(x, y);
+                        let alpha = pixel[3] as u32;
+                        let r = ((pixel[0] as u32 * alpha) / 255) as u8;
+                        let g = ((pixel[1] as u32 * alpha) / 255) as u8;
+                        let b = ((pixel[2] as u32 * alpha) / 255) as u8;
+
+                        let r5 = ((r >> 3) & 0x1f) as u16;
+                        let g6 = ((g >> 2) & 0x3f) as u16;
+                        let b5 = ((b >> 3) & 0x1f) as u16;
+                        let rgb565 = (r5 << 11) | (g6 << 5) | b5;
+
+                        raw_bytes.push(((rgb565 >> 8) & 0xff) as u8);
+                        raw_bytes.push((rgb565 & 0xff) as u8);
+                    }
+                }
+                processed_frames.push(raw_bytes);
+
+                if idx % 5 == 0 || idx == frames_to_process.len() - 1 {
+                    progress_cb(
+                        5 + (((idx as f32) / (frames_to_process.len() as f32)) * 5.0) as u32,
+                        &format!("Procesando fotograma {} de {}...", idx + 1, frames_to_process.len()),
+                    );
+                }
+            }
+        } else {
+            // Imagen estática (PNG, JPG, WebP, etc.)
+            let dynamic_img = image::load_from_memory(image_bytes)
+                .map_err(|e| format!("Error procesando formato de imagen: {}", e))?;
+
+            let resized = dynamic_img.resize_exact(128, 128, image::imageops::FilterType::Lanczos3);
+            let mut raw_bytes = Vec::with_capacity(128 * 128 * 2);
+            for x in 0..128 {
+                for y in 0..128 {
+                    let pixel = resized.get_pixel(x, y);
+                    let r = pixel[0];
+                    let g = pixel[1];
+                    let b = pixel[2];
+
+                    let r5 = ((r >> 3) & 0x1f) as u16;
+                    let g6 = ((g >> 2) & 0x3f) as u16;
+                    let b5 = ((b >> 3) & 0x1f) as u16;
+                    let rgb565 = (r5 << 11) | (g6 << 5) | b5;
+
+                    raw_bytes.push(((rgb565 >> 8) & 0xff) as u8);
+                    raw_bytes.push((rgb565 & 0xff) as u8);
+                }
+            }
+            processed_frames.push(raw_bytes);
+            frame_delay = 0;
         }
 
-        let total_bytes = raw_bytes.len() as u32;
+        let total_frames = processed_frames.len();
+        let frame_bytes_len = 128 * 128 * 2; // 32768 bytes
 
-        progress_cb(10, "Enviando handshake de inicialización TFT (Opcode 0xA5)...");
+        progress_cb(
+            10,
+            &format!("Iniciando enlace TFT con microcontrolador ({} fotogramas)...", total_frames),
+        );
 
-        // Cabecera Handshake 0xA5 con reenvíos cíclicos en caso de microcontrolador ocupado
+        // 1. Handshake inicial obligatorio (0xA5)
         let mut handshake = [0u8; 64];
         handshake[0] = CMD_GETTFTLCDDATA; // 0xA5 (165)
-        handshake[1] = 0; // currentFrame
-        handshake[2] = 1; // frameNum
-        handshake[3] = 0; // frameDelay
-        handshake[4] = (total_bytes & 0xff) as u8;
-        handshake[5] = ((total_bytes >> 8) & 0xff) as u8;
+        handshake[1] = 0; // currentFrame (siempre 0 en el handshake)
+        handshake[2] = total_frames as u8; // total de fotogramas
+        handshake[3] = frame_delay; // delay entre fotogramas en ms
+        handshake[4] = (frame_bytes_len & 0xff) as u8;        // 0x00
+        handshake[5] = ((frame_bytes_len >> 8) & 0xff) as u8; // 0x80 (32768)
         handshake[6] = 0;
         Self::apply_bit7_checksum(&mut handshake);
         handshake[8] = 0;   // left
@@ -301,8 +392,8 @@ impl AjazzMouseDevice {
         handshake[13] = 0;
         handshake[14] = 0;
         handshake[15] = 0;
-        handshake[16] = ((total_bytes >> 16) & 0xff) as u8;
-        handshake[17] = ((total_bytes >> 24) & 0xff) as u8;
+        handshake[16] = ((frame_bytes_len >> 16) & 0xff) as u8;
+        handshake[17] = ((frame_bytes_len >> 24) & 0xff) as u8;
 
         let mut ack_ok = false;
         for attempt in 0..10 {
@@ -316,7 +407,6 @@ impl AjazzMouseDevice {
                 }
             }
             if attempt == 9 {
-                // Proceder aun si el controlador procesó sin respuesta explícita
                 ack_ok = true;
             }
         }
@@ -325,49 +415,76 @@ impl AjazzMouseDevice {
             return Err("El microcontrolador de la base TFT no respondió al handshake.".into());
         }
 
-        progress_cb(15, "Transmitiendo 586 paquetes de datos a la pantalla...");
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Fragmentación en paquetes de 56 bytes (Opcode 0x25)
+        // 2. Transmisión secuencial de cada fotograma
         let chunk_size = 56;
-        let total_chunks = (raw_bytes.len() + chunk_size - 1) / chunk_size;
+        let chunks_per_frame = (frame_bytes_len + chunk_size - 1) / chunk_size; // 586 chunks
+        let total_all_chunks = total_frames * chunks_per_frame;
 
-        for y in 0..total_chunks {
-            let start = y * chunk_size;
-            let end = (start + chunk_size).min(raw_bytes.len());
-            let chunk = &raw_bytes[start..end];
+        for (frame_idx, frame_data) in processed_frames.iter().enumerate() {
+            for c in 0..chunks_per_frame {
+                let start = c * chunk_size;
+                let end = (start + chunk_size).min(frame_data.len());
+                let chunk = &frame_data[start..end];
 
-            let mut packet = [0u8; 64];
-            packet[0] = CMD_SETTFTLCDDATA; // 0x25 (37)
-            packet[1] = 0; // currentFrame
-            packet[2] = 1; // frameNum
-            packet[3] = 0; // frameDelay
-            packet[4] = (y & 0xff) as u8;
-            packet[5] = ((y >> 8) & 0xff) as u8;
-            packet[6] = chunk.len() as u8;
-            Self::apply_bit7_checksum(&mut packet);
-            packet[8..8 + chunk.len()].copy_from_slice(chunk);
+                let mut packet = [0u8; 64];
+                packet[0] = CMD_SETTFTLCDDATA; // 0x25 (37)
+                packet[1] = frame_idx as u8;   // currentFrame (0, 1, ..., total_frames - 1)
+                packet[2] = total_frames as u8;// total de fotogramas
+                packet[3] = frame_delay;       // retardo entre fotogramas en ms
+                packet[4] = (c & 0xff) as u8;  // chunk index LE byte bajo
+                packet[5] = ((c >> 8) & 0xff) as u8; // chunk index LE byte alto
+                packet[6] = chunk.len() as u8;
+                Self::apply_bit7_checksum(&mut packet);
+                packet[8..8 + chunk.len()].copy_from_slice(chunk);
 
-            Self::send_feature(device, &packet)?;
+                Self::send_feature(device, &packet)?;
 
-            if y % 15 == 0 || y == total_chunks - 1 {
-                let pct = 15 + (((y as f32) / (total_chunks as f32)) * 84.0) as u32;
-                progress_cb(pct, &format!("Transmitiendo paquete {} de {}...", y + 1, total_chunks));
-                std::thread::sleep(std::time::Duration::from_millis(3));
-            } else {
+                let current_chunk_idx = frame_idx * chunks_per_frame + c;
+                if current_chunk_idx % 25 == 0 || current_chunk_idx == total_all_chunks - 1 {
+                    let pct = 10 + (((current_chunk_idx as f32) / (total_all_chunks as f32)) * 89.0) as u32;
+                    if total_frames > 1 {
+                        progress_cb(
+                            pct,
+                            &format!(
+                                "Fotograma {}/{} - Enviando paquete {}/{}...",
+                                frame_idx + 1,
+                                total_frames,
+                                c + 1,
+                                chunks_per_frame
+                            ),
+                        );
+                    } else {
+                        progress_cb(
+                            pct,
+                            &format!("Transmitiendo paquete {} de {}...", c + 1, chunks_per_frame),
+                        );
+                    }
+                }
+
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
+
+            // Intervalo breve de 20ms entre fotogramas para estabilidad de escritura en flash
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
         std::thread::sleep(std::time::Duration::from_millis(100));
-        progress_cb(100, "¡Imagen transferida con éxito!");
+        if total_frames > 1 {
+            progress_cb(100, "¡Animación GIF transferida con éxito a la pantalla TFT!");
+        } else {
+            progress_cb(100, "¡Imagen transferida con éxito a la pantalla TFT!");
+        }
 
         Ok(())
     }
 
-    /// Carga una imagen codificada en Base64
+    /// Carga una imagen o GIF codificado en Base64
     pub fn upload_base64_image<F>(
         device: &HidDevice,
         base64_str: &str,
+        custom_delay_ms: Option<u32>,
         progress_cb: F,
     ) -> Result<(), String>
     where
@@ -383,8 +500,9 @@ impl AjazzMouseDevice {
             .decode(clean.trim())
             .map_err(|e| format!("Error decodificando imagen base64: {}", e))?;
 
-        Self::upload_image_data(device, &decoded, progress_cb)
+        Self::upload_image_data(device, &decoded, custom_delay_ms, progress_cb)
     }
+
 
     /// Consulta el nivel de batería y estado de carga
     pub fn get_battery(device: &HidDevice) -> Result<BatteryInfo, String> {

@@ -476,25 +476,34 @@ class MouseProtocolService {
    * y la fragmentación en paquetes 0x25 (FEA_CMD_SETTFTLCDDATA) con cabecera estricta.
    */
   async uploadImageToScreen(
-    imgElement: HTMLImageElement,
+    asset: File | HTMLImageElement,
+    frameDelay: number = 60,
     onProgress: (percent: number, statusText?: string) => void
   ): Promise<void> {
     if (this.isTauri) {
-      logger.tx('Iniciando carga de imagen mediante el controlador nativo Rust...');
-      onProgress(5, 'Procesando imagen con motor nativo Rust...');
+      logger.tx('Iniciando carga de imagen/GIF mediante el controlador nativo Rust...');
+      onProgress(3, 'Leyendo archivo binario original...');
 
-      const canvas = document.createElement('canvas');
-      canvas.width = 128;
-      canvas.height = 128;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('No se pudo inicializar canvas 2D');
-
-      if (!imgElement.complete) {
-        await imgElement.decode().catch(() => {});
+      let base64 = '';
+      if (asset instanceof File) {
+        base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error('Error leyendo archivo seleccionado'));
+          reader.readAsDataURL(asset);
+        });
+      } else {
+        const canvas = document.createElement('canvas');
+        canvas.width = 128;
+        canvas.height = 128;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('No se pudo inicializar canvas 2D');
+        if (!asset.complete) {
+          await asset.decode().catch(() => {});
+        }
+        ctx.drawImage(asset, 0, 0, 128, 128);
+        base64 = canvas.toDataURL('image/png');
       }
-
-      ctx.drawImage(imgElement, 0, 0, 128, 128);
-      const base64 = canvas.toDataURL('image/png');
 
       const { invoke } = await import('@tauri-apps/api/core');
       let unlisten = () => {};
@@ -510,8 +519,11 @@ class MouseProtocolService {
       }
 
       try {
-        await invoke('upload_image_to_screen', { imageBase64: base64 });
-        onProgress(100, '¡Imagen transferida con éxito!');
+        await invoke('upload_image_to_screen', {
+          imageBase64: base64,
+          frameDelay: Math.round(frameDelay),
+        });
+        onProgress(100, '¡Transferencia completada con éxito!');
         logger.rx('✓ Transferencia exitosa vía driver nativo Rust.');
       } finally {
         unlisten();
@@ -519,47 +531,94 @@ class MouseProtocolService {
       return;
     }
 
-    logger.tx('1/3 Procesando imagen: redimensionando a 128x128 y convirtiendo a RGB565...');
-    onProgress(5, 'Convirtiendo imagen a formato 16-bit RGB565...');
+    // --- Modo WebHID (Navegador) ---
+    logger.tx('Procesando fotogramas para pantalla TFT...');
+    onProgress(5, 'Analizando formato de imagen...');
 
-    const canvas = document.createElement('canvas');
-    canvas.width = 128;
-    canvas.height = 128;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('No se pudo inicializar canvas 2D');
+    const convertToRgb565 = (imgData: Uint8ClampedArray): Uint8Array => {
+      const totalBytes = 128 * 128 * 2;
+      const rawBytes = new Uint8Array(totalBytes);
+      let byteIdx = 0;
+      for (let x = 0; x < 128; x++) {
+        for (let y = 0; y < 128; y++) {
+          const offset = (y * 128 + x) * 4;
+          const r = imgData[offset];
+          const g = imgData[offset + 1];
+          const b = imgData[offset + 2];
+          const r5 = (r >> 3) & 0x1f;
+          const g6 = (g >> 2) & 0x3f;
+          const b5 = (b >> 3) & 0x1f;
+          const rgb565 = (r5 << 11) | (g6 << 5) | b5;
+          rawBytes[byteIdx++] = (rgb565 >> 8) & 0xff;
+          rawBytes[byteIdx++] = rgb565 & 0xff;
+        }
+      }
+      return rawBytes;
+    };
 
-    if (!imgElement.complete) {
-      await imgElement.decode().catch(() => {});
-    }
+    const isGif =
+      asset instanceof File &&
+      (asset.type === 'image/gif' || asset.name.toLowerCase().endsWith('.gif'));
 
-    ctx.drawImage(imgElement, 0, 0, 128, 128);
-    const imgData = ctx.getImageData(0, 0, 128, 128).data;
+    const framesData: Uint8Array[] = [];
 
-    // Convertir a RGB565 (128x128x2 = 32,768 bytes) en orden Column-Major y Big-Endian
-    // según la especificación de firmware ST7735/GC9A01 de la base magnética AJAZZ APEX
-    const totalBytes = 128 * 128 * 2;
-    const rawBytes = new Uint8Array(totalBytes);
-    let byteIdx = 0;
+    if (isGif && typeof (window as any).ImageDecoder !== 'undefined') {
+      try {
+        const decoder = new (window as any).ImageDecoder({
+          data: (asset as File).stream(),
+          type: 'image/gif',
+        });
+        await decoder.tracks.ready;
+        const total = Math.min(60, decoder.tracks.selectedTrack.frameCount);
+        const canvas = document.createElement('canvas');
+        canvas.width = 128;
+        canvas.height = 128;
+        const ctx = canvas.getContext('2d');
 
-    for (let x = 0; x < 128; x++) {
-      for (let y = 0; y < 128; y++) {
-        const offset = (y * 128 + x) * 4;
-        const r = imgData[offset];
-        const g = imgData[offset + 1];
-        const b = imgData[offset + 2];
-
-        const r5 = (r >> 3) & 0x1f;
-        const g6 = (g >> 2) & 0x3f;
-        const b5 = (b >> 3) & 0x1f;
-        const rgb565 = (r5 << 11) | (g6 << 5) | b5;
-
-        // Big-Endian: Byte alto primero, luego byte bajo
-        rawBytes[byteIdx++] = (rgb565 >> 8) & 0xff;
-        rawBytes[byteIdx++] = rgb565 & 0xff;
+        for (let i = 0; i < total; i++) {
+          const frame = await decoder.decode({ frameIndex: i });
+          if (ctx) {
+            ctx.clearRect(0, 0, 128, 128);
+            ctx.drawImage(frame.image, 0, 0, 128, 128);
+            const imgData = ctx.getImageData(0, 0, 128, 128).data;
+            framesData.push(convertToRgb565(imgData));
+          }
+          frame.image.close();
+        }
+      } catch (e) {
+        logger.warn(`Fallo al decodificar GIF con ImageDecoder: ${e}`);
       }
     }
 
-    onProgress(10, 'Enviando handshake de inicialización TFT (Opcode 0xA5)...');
+    // Si no se extrajeron fotogramas múltiples (imagen estática o fallback)
+    if (framesData.length === 0) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 128;
+      canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('No se pudo inicializar canvas 2D');
+
+      if (asset instanceof File) {
+        const img = new Image();
+        const url = URL.createObjectURL(asset);
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = url;
+        });
+        ctx.drawImage(img, 0, 0, 128, 128);
+        URL.revokeObjectURL(url);
+      } else {
+        if (!asset.complete) await asset.decode().catch(() => {});
+        ctx.drawImage(asset, 0, 0, 128, 128);
+      }
+      framesData.push(convertToRgb565(ctx.getImageData(0, 0, 128, 128).data));
+    }
+
+    const totalFrames = framesData.length;
+    const totalBytesPerFrame = 128 * 128 * 2; // 32768
+
+    onProgress(10, `Iniciando handshake TFT (${totalFrames} fotogramas)...`);
 
     const applyBit7Checksum = (buf: Uint8Array) => {
       let sum = 0;
@@ -569,29 +628,24 @@ class MouseProtocolService {
       buf[7] = 255 - (sum & 255);
     };
 
-    // 2. Handshake obligatorio según el protocolo oficial (FEA_CMD_GETTFTLCDDATA = 165 / 0xA5)
-    logger.tx('2/3 Enviando handshake TFT (Opcode 0xA5, longitud 32768 bytes)...');
+    // Handshake obligatorio (0xA5)
+    logger.tx(`Enviando handshake TFT (Opcode 0xA5, ${totalFrames} fotogramas)...`);
     const handshake = new Uint8Array(64);
     handshake[0] = CMD_GETTFTLCDDATA; // 0xA5 (165)
     handshake[1] = 0; // currentFrame
-    handshake[2] = 1; // frameNum
-    handshake[3] = 0; // frameDelay
-    handshake[4] = totalBytes & 0xff;        // 0x00
-    handshake[5] = (totalBytes >> 8) & 0xff; // 0x80 (32768 = 0x8000)
+    handshake[2] = totalFrames;
+    handshake[3] = totalFrames > 1 ? Math.round(frameDelay) : 0;
+    handshake[4] = totalBytesPerFrame & 0xff;        // 0x00
+    handshake[5] = (totalBytesPerFrame >> 8) & 0xff; // 0x80
     handshake[6] = 0;
     applyBit7Checksum(handshake);
     handshake[8] = 0;   // left
     handshake[9] = 0;   // top
-    handshake[10] = 128;// right (ancho = 128)
-    handshake[11] = 128;// bottom (alto = 128)
-    handshake[12] = 0;  // left >> 8
-    handshake[13] = 0;  // top >> 8
-    handshake[14] = 0;  // right >> 8
-    handshake[15] = 0;  // bottom >> 8
-    handshake[16] = (totalBytes >> 16) & 0xff;
-    handshake[17] = (totalBytes >> 24) & 0xff;
+    handshake[10] = 128;// right (128)
+    handshake[11] = 128;// bottom (128)
+    handshake[16] = (totalBytesPerFrame >> 16) & 0xff;
+    handshake[17] = (totalBytesPerFrame >> 24) & 0xff;
 
-    // 3. Verificación de ACK del microcontrolador re-enviando el handshake en cada intento
     let ackOk = false;
     for (let attempt = 0; attempt < 10; attempt++) {
       await this.sendFeatureReport(handshake, 'screen');
@@ -600,10 +654,8 @@ class MouseProtocolService {
       if (ackResp) {
         if (ackResp[1] === 1 || ackResp[0] === 1 || (ackResp[0] === CMD_GETTFTLCDDATA && ackResp[1] === 1)) {
           ackOk = true;
-          logger.rx(`✓ ACK recibido del controlador TFT en intento ${attempt + 1}. Listo para recibir datos.`);
+          logger.rx(`✓ ACK recibido del controlador TFT (intento ${attempt + 1}). Listo para transferir.`);
           break;
-        } else if (ackResp[1] === 0) {
-          logger.info(`Microcontrolador procesando handshake (intento ${attempt + 1}/10)...`);
         }
       }
     }
@@ -612,44 +664,50 @@ class MouseProtocolService {
       logger.warn('El microcontrolador no devolvió ACK 1 explícito tras el handshake; procediendo con la transmisión...');
     }
 
-    onProgress(15, 'Transmitiendo 586 paquetes de datos a la pantalla...');
-
-    // 4. Fragmentación en 586 bloques de 56 bytes (FEA_CMD_SETTFTLCDDATA = 37 / 0x25)
-    const totalChunks = Math.ceil(totalBytes / 56);
-    logger.tx(`3/3 Transmitiendo ${totalChunks} paquetes HID de 56 bytes a pantalla TFT...`);
-
-    for (let y = 0; y < totalChunks; y++) {
-      const packet = new Uint8Array(64);
-      packet[0] = CMD_SETTFTLCDDATA; // 0x25 (37)
-      packet[1] = 0; // currentFrame
-      packet[2] = 1; // frameNum
-      packet[3] = 0; // frameDelay
-      packet[4] = y & 0xff;        // byte bajo de chunk index (UInt16LE)
-      packet[5] = (y >> 8) & 0xff; // byte alto de chunk index (UInt16LE)
-
-      const chunk = rawBytes.subarray(y * 56, (y + 1) * 56);
-      packet[6] = chunk.length;    // longitud del chunk (56 o residuo)
-      applyBit7Checksum(packet);
-
-      packet.set(chunk, 8); // Datos de píxeles en bytes 8..63
-
-      await this.sendFeatureReport(packet, 'screen');
-
-      if (y % 15 === 0 || y === totalChunks - 1) {
-        const pct = Math.min(99, Math.round((y / totalChunks) * 83) + 15);
-        onProgress(pct, `Paquete ${y + 1} de ${totalChunks} (${pct}%)...`);
-        await new Promise((r) => setTimeout(r, 4));
-      } else {
-        await new Promise((r) => setTimeout(r, 2));
-      }
-    }
-
-    // Pequeño retardo final para que el buffer TFT termine de pintar
     await new Promise((r) => setTimeout(r, 100));
 
-    logger.rx('✓ Transferencia exitosa: 32,768 bytes (586 paquetes) desplegados en pantalla TFT.');
-    onProgress(100, '¡Imagen transferida y desplegada en pantalla!');
+    // Transmitir cada fotograma
+    const chunkSize = 56;
+    const totalChunks = Math.ceil(totalBytesPerFrame / chunkSize);
+    const overallChunks = totalFrames * totalChunks;
+
+    for (let f = 0; f < totalFrames; f++) {
+      const rawBytes = framesData[f];
+      for (let y = 0; y < totalChunks; y++) {
+        const packet = new Uint8Array(64);
+        packet[0] = CMD_SETTFTLCDDATA; // 0x25 (37)
+        packet[1] = f;                 // currentFrame
+        packet[2] = totalFrames;       // frameNum
+        packet[3] = totalFrames > 1 ? Math.round(frameDelay) : 0;
+        packet[4] = y & 0xff;
+        packet[5] = (y >> 8) & 0xff;
+
+        const chunk = rawBytes.subarray(y * chunkSize, (y + 1) * chunkSize);
+        packet[6] = chunk.length;
+        applyBit7Checksum(packet);
+        packet.set(chunk, 8);
+
+        await this.sendFeatureReport(packet, 'screen');
+
+        const currentOverall = f * totalChunks + y;
+        if (currentOverall % 25 === 0 || currentOverall === overallChunks - 1) {
+          const pct = Math.min(99, Math.round((currentOverall / overallChunks) * 88) + 11);
+          if (totalFrames > 1) {
+            onProgress(pct, `Fotograma ${f + 1}/${totalFrames} (paquete ${y + 1}/${totalChunks})...`);
+          } else {
+            onProgress(pct, `Enviando paquete ${y + 1} de ${totalChunks}...`);
+          }
+        }
+
+        await new Promise((r) => setTimeout(r, 2));
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    onProgress(100, '¡Transferencia a pantalla TFT finalizada con éxito!');
+    logger.rx(`✓ Transferencia exitosa: ${totalFrames} fotogramas desplegados en la pantalla TFT.`);
   }
+
 
   private hexToRgb(hex: string): { r: number; g: number; b: number } {
     const clean = hex.replace('#', '');

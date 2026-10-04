@@ -56,24 +56,37 @@ export const ScreenStudio: React.FC = () => {
     }
   };
 
+  const isGif = Boolean(
+    selectedFile && (selectedFile.type === 'image/gif' || selectedFile.name.toLowerCase().endsWith('.gif'))
+  );
+
   const handleUploadScreen = async () => {
-    if (!selectedFile || !imgRef.current) return;
+    if (!selectedFile) return;
     setUploadProgress(1);
-    setUploadStatusText('Iniciando transferencia...');
+    setUploadStatusText('Iniciando transferencia a pantalla TFT...');
 
     try {
-      await mouseService.uploadImageToScreen(imgRef.current, (progress, statusText) => {
-        setUploadProgress(progress);
-        if (statusText) setUploadStatusText(statusText);
-      });
+      await mouseService.uploadImageToScreen(
+        selectedFile,
+        frameDelay,
+        (progress, statusText) => {
+          setUploadProgress(progress);
+          if (statusText) setUploadStatusText(statusText);
+        }
+      );
 
       setUploadProgress(null);
       setUploadStatusText('');
-      errorManager.showSuccess('Transferencia Completada', 'La imagen se envió exitosamente a la pantalla TFT del mouse.');
+      errorManager.showSuccess(
+        'Transferencia Completada',
+        isGif
+          ? '¡La animación GIF se cargó y desplegó en la pantalla de la base exitosamente!'
+          : '¡La imagen se envió exitosamente a la pantalla TFT del mouse!'
+      );
     } catch (err: any) {
       setUploadProgress(null);
       setUploadStatusText('');
-      errorManager.handle(err, 'Carga de imagen a pantalla TFT 128x128');
+      errorManager.handle(err, 'Carga de contenido a pantalla TFT 128x128');
     }
   };
 
@@ -95,7 +108,7 @@ export const ScreenStudio: React.FC = () => {
               Estudio de Pantalla TFT (128x128 Píxeles)
             </h2>
             <p className="text-sm text-slate-400 mt-1">
-              Personaliza la pantalla de la base magnética del mouse con imágenes, animaciones o sincroniza la hora actual.
+              Personaliza la pantalla de la base magnética del mouse con imágenes, animaciones GIF o sincroniza la hora actual.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -187,7 +200,7 @@ export const ScreenStudio: React.FC = () => {
         {/* Upload & Controls Zone */}
         <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-6 flex flex-col justify-between">
           <div className="space-y-4">
-            <h3 className="text-sm font-semibold text-slate-300">Cargar Imagen o GIF</h3>
+            <h3 className="text-sm font-semibold text-slate-300">Cargar Imagen o Animación GIF</h3>
 
             <div
               onClick={() => fileInputRef.current?.click()}
@@ -202,24 +215,51 @@ export const ScreenStudio: React.FC = () => {
               />
               <Upload className="w-8 h-8 text-slate-500 group-hover:text-indigo-400 transition mb-2" />
               <p className="text-sm text-slate-300 font-medium">Haz clic o arrastra un archivo aquí</p>
-              <p className="text-xs text-slate-500 mt-1">Soporta GIFs animados, PNG y JPG (se ajustarán a 128x128)</p>
+              <p className="text-xs text-slate-500 mt-1">Soporta GIFs animados multicapa, PNG y JPG (128x128)</p>
             </div>
 
-            <div className="space-y-2 pt-2">
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-400">Velocidad / Retardo entre frames:</span>
-                <span className="font-mono text-indigo-400">{frameDelay} ms</span>
+            {selectedFile && (
+              <div className="flex items-center justify-between px-3 py-2 bg-slate-800/60 border border-slate-700/60 rounded-lg text-xs">
+                <div className="flex items-center gap-2 truncate">
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider uppercase ${
+                      isGif
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                        : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
+                    }`}
+                  >
+                    {isGif ? 'GIF Animado' : 'Imagen'}
+                  </span>
+                  <span className="text-slate-300 truncate font-mono">{selectedFile.name}</span>
+                </div>
+                <span className="text-slate-400 text-[11px] shrink-0 font-mono">
+                  {(selectedFile.size / 1024).toFixed(1)} KB
+                </span>
               </div>
-              <input
-                type="range"
-                min="20"
-                max="200"
-                step="5"
-                value={frameDelay}
-                onChange={(e) => setFrameDelay(Number(e.target.value))}
-                className="w-full accent-indigo-500 cursor-pointer"
-              />
-            </div>
+            )}
+
+            {isGif && (
+              <div className="space-y-2 pt-2 p-3 bg-slate-950/40 border border-slate-800 rounded-lg">
+                <div className="flex justify-between text-xs">
+                  <span className="text-slate-400">Velocidad de Animación (Retardo):</span>
+                  <span className="font-mono text-amber-400 font-semibold">{frameDelay} ms</span>
+                </div>
+                <input
+                  type="range"
+                  min="20"
+                  max="200"
+                  step="5"
+                  value={frameDelay}
+                  onChange={(e) => setFrameDelay(Number(e.target.value))}
+                  className="w-full accent-amber-500 cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] text-slate-500">
+                  <span>Rápido (20ms / 50 FPS)</span>
+                  <span>Estándar (60ms)</span>
+                  <span>Lento (200ms / 5 FPS)</span>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="pt-6 space-y-4">
@@ -227,13 +267,13 @@ export const ScreenStudio: React.FC = () => {
               <div className="space-y-1.5">
                 <div className="flex justify-between text-xs font-medium">
                   <span className="text-indigo-400 truncate max-w-[80%]">
-                    {uploadStatusText || 'Enviando paquetes HID (RGB565)...'}
+                    {uploadStatusText || 'Enviando paquetes HID a pantalla TFT...'}
                   </span>
                   <span className="text-slate-300 font-mono">{uploadProgress}%</span>
                 </div>
                 <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-indigo-500 transition-all duration-150 ease-out"
+                    className="h-full bg-gradient-to-r from-indigo-500 to-amber-500 transition-all duration-150 ease-out"
                     style={{ width: `${uploadProgress}%` }}
                   />
                 </div>
@@ -243,11 +283,17 @@ export const ScreenStudio: React.FC = () => {
             <button
               onClick={handleUploadScreen}
               disabled={!selectedFile || uploadProgress !== null}
-              className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-medium rounded-lg text-sm transition shadow-lg shadow-indigo-600/20 disabled:shadow-none cursor-pointer"
+              className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-medium rounded-lg text-sm transition shadow-lg shadow-indigo-600/20 disabled:shadow-none cursor-pointer flex items-center justify-center gap-2"
             >
-              Subir a la Pantalla del Mouse
+              <Upload className="w-4 h-4" />
+              {uploadProgress !== null
+                ? 'Transfiriendo a pantalla...'
+                : isGif
+                ? 'Subir Animación GIF a la Pantalla'
+                : 'Subir Imagen a la Pantalla'}
             </button>
           </div>
+
         </div>
       </div>
     </div>
