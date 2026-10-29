@@ -44,9 +44,14 @@ def app_icon():
 
 def tray_icon():
     # Template de macOS: solo cuenta el canal alfa (negro sobre transparente).
-    size = 64
+    # macOS escala el icono a la altura de la barra: el margen transparente
+    # lo iguala en tamaño a los iconos del sistema.
+    size, glyph = 64, 44
+    alpha = Image.new("L", (size, size), 0)
+    off = (size - glyph) // 2
+    alpha.paste(logo.getchannel("A").resize((glyph, glyph), Image.LANCZOS), (off, off))
     tray = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    tray.putalpha(logo.getchannel("A").resize((size, size), Image.LANCZOS))
+    tray.putalpha(alpha)
     tray.save(HERE.parent.parent / "src-tauri" / "icons" / "tray-template.png")
 
 
