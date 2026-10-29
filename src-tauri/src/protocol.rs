@@ -24,7 +24,8 @@ pub const CMD_MOUSE_SET_OPTIONPARAM1: u8 = 0x54; // 84
 pub const CMD_GET_BATTERY: u8 = 0x83;    // 131 (sin respuesta en el receptor 2.4G 8K)
 pub const CMD_GET_STATUS: u8 = 0xF7;     // 247 - estado del mouse: batería en el byte 2
 pub const CMD_GETTFTLCDDATA: u8 = 0xA5;   // 165
-pub const CMD_SET_FLASHCHIPERASE: u8 = 0xAC; // 172
+#[allow(dead_code)]
+pub const CMD_SET_FLASHCHIPERASE: u8 = 0xAC; // 172 - borra la memoria de la pantalla: no exponer
 pub const CMD_GETOLED_VERSION: u8 = 0xAD;    // 173
 
 
@@ -42,8 +43,17 @@ pub struct BatteryInfo {
     /// `None` cuando la fuente no informa el estado de carga.
     pub is_charging: Option<bool>,
     pub is_connected: bool,
-    /// Origen de la lectura: "hid" (comando 0x83) o "bluetooth" (reportada por macOS).
+    /// Origen de la lectura: "hid" (comando 0xF7) o "bluetooth" (reportada por macOS).
     pub source: String,
+}
+
+/// Lectura periódica del dispositivo: alimenta el tray y el estado de conexión del frontend.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct DeviceStatus {
+    pub battery: Option<BatteryInfo>,
+    /// El receptor 2.4G está enchufado (aunque el mouse esté apagado o dormido).
+    pub receiver_connected: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -57,6 +67,15 @@ pub struct ScreenHardwareInfo {
 pub struct AjazzMouseDevice;
 
 impl AjazzMouseDevice {
+    /// Indica si el receptor/base está enchufado, sin abrir ninguna interfaz.
+    pub fn is_present(api: &mut HidApi) -> Result<bool, String> {
+        api.refresh_devices()
+            .map_err(|e| format!("Error enumerando dispositivos HID: {}", e))?;
+        Ok(api
+            .device_list()
+            .any(|info| info.vendor_id() == VID_AJAZZ && info.product_id() == PID_AJAZZ_APEX))
+    }
+
     /// Interfaz propietaria del fabricante (UsagePage 0xFFFF). En macOS/Windows el
     /// `usage_page` es fiable; en backends que no lo informan (0) se usa el número de interfaz.
     fn is_vendor_interface(info: &hidapi::DeviceInfo) -> bool {
@@ -227,20 +246,6 @@ impl AjazzMouseDevice {
             flash_version: String::new(),
             details: "El dispositivo se abrió pero no respondió a la consulta de versión (0xAD).".into(),
         })
-    }
-
-    /// Borrado completo de la memoria Flash del controlador TFT (Opcode 0xAC)
-    pub fn erase_flash(device: &HidDevice) -> Result<bool, String> {
-        let mut buf = [0u8; 64];
-        buf[0] = CMD_SET_FLASHCHIPERASE; // 0xAC (172)
-        Self::send_feature(device, &buf)?;
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        let resp = Self::read_feature(device, CMD_SET_FLASHCHIPERASE)?;
-        if resp.len() >= 5 && resp[0] == CMD_SET_FLASHCHIPERASE && resp[1] == 170 && resp[2] == 170 && resp[3] == 85 && resp[4] == 85 {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
     }
 
     /// Sincroniza el reloj de la pantalla con la fecha y hora actual del sistema operativo

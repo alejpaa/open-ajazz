@@ -28,23 +28,19 @@ const TABS: { id: Tab; label: string; icon: LucideIcon }[] = [
   { id: 'battery', label: 'Batería y estado', icon: Battery },
 ];
 
-const BATTERY_POLL_MS = 30_000;
-
 const chargeLabel = (b: BatteryInfo) =>
   b.is_charging === true ? 'Cargando' : b.is_charging === false ? 'En batería' : b.source === 'bluetooth' ? 'Bluetooth' : '2.4G / USB';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('screen');
-  const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
-  const { battery, screenImage } = useDeviceStore();
+  const { battery, receiverConnected, screenImage } = useDeviceStore();
 
   const connect = useCallback(async (silent: boolean) => {
     setIsConnecting(true);
     try {
       await mouseService.connect(false);
-      setIsConnected(mouseService.isConnected());
       const info = mouseService.getScreenInfo();
       deviceStore.setScreenInfo(info);
       if (!silent) {
@@ -54,10 +50,10 @@ export default function App() {
         );
       }
     } catch (e) {
-      setIsConnected(false);
       if (!silent) errorManager.handle(e, 'Conexión con el dispositivo');
     } finally {
       setIsConnecting(false);
+      if (!silent) deviceStore.refreshBattery();
     }
   }, []);
 
@@ -65,22 +61,19 @@ export default function App() {
     connect(true);
   }, [connect]);
 
-  useEffect(() => {
-    const poll = () => {
-      if (!document.hidden) deviceStore.refreshBattery();
-    };
-    poll();
-    const timer = setInterval(poll, BATTERY_POLL_MS);
-    document.addEventListener('visibilitychange', poll);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener('visibilitychange', poll);
-    };
-  }, []);
+  // El backend sondea el dispositivo y publica cada lectura; la conexión se deriva de ellas.
+  useEffect(() => deviceStore.watchDeviceStatus(), []);
 
   const viaBluetooth = battery?.source === 'bluetooth';
-  const isOnline = isConnected || viaBluetooth;
-  const statusLabel = isConnected ? 'Conectado' : viaBluetooth ? 'Bluetooth' : 'Desconectado';
+  const isOnline = receiverConnected || viaBluetooth;
+  const statusLabel = viaBluetooth
+    ? 'Bluetooth'
+    : receiverConnected
+    ? battery
+      ? 'Conectado'
+      : 'Mouse sin respuesta'
+    : 'Desconectado';
+  const statusDot = battery ? 'bg-ok-500' : isOnline ? 'bg-warn-500' : 'bg-neutral-600';
 
   const BatteryIcon = battery?.is_charging === true ? BatteryCharging : Battery;
 
@@ -99,10 +92,9 @@ export default function App() {
         <section className="border border-neutral-800 rounded-lg p-3 space-y-3 mb-5" aria-label="Dispositivo">
           <div className="flex items-center justify-between text-xs">
             <span className="flex items-center gap-1.5 text-neutral-300">
-              <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-ok-500' : 'bg-neutral-600'}`} />
+              <span className={`w-2 h-2 rounded-full ${statusDot}`} />
               {statusLabel}
             </span>
-            <span className="font-mono text-neutral-500">3151:5007</span>
           </div>
 
           {isOnline && (
@@ -135,7 +127,7 @@ export default function App() {
             disabled={isConnecting}
             className="w-full py-1.5 rounded-md text-xs font-medium bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-neutral-100 transition cursor-pointer"
           >
-            {isConnecting ? 'Buscando…' : isConnected ? 'Reconectar' : 'Conectar'}
+            {isConnecting ? 'Buscando…' : isOnline ? 'Reconectar' : 'Conectar'}
           </button>
         </section>
 

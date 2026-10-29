@@ -2,11 +2,18 @@
 
 mod protocol;
 
-use protocol::{AjazzMouseDevice, BatteryInfo, DpiStageConfig, ScreenHardwareInfo};
+use protocol::{AjazzMouseDevice, BatteryInfo, DeviceStatus, DpiStageConfig, ScreenHardwareInfo};
 use hidapi::HidApi;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, OnceLock};
-use tauri::Emitter;
+use std::time::Duration;
+use tauri::image::Image;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
+
+const TRAY_ID: &str = "battery";
+const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 type HidJob = Box<dyn FnOnce(&mut Option<HidApi>) + Send>;
 
@@ -83,15 +90,6 @@ async fn verify_screen_hardware() -> Result<ScreenHardwareInfo, String> {
 }
 
 #[tauri::command]
-async fn erase_flash_memory() -> Result<bool, String> {
-    run_hid(|api| {
-        let dev = AjazzMouseDevice::open_dock(api)?;
-        AjazzMouseDevice::erase_flash(&dev)
-    })
-    .await
-}
-
-#[tauri::command]
 async fn upload_image_to_screen(
     app: tauri::AppHandle,
     image_base64: String,
@@ -126,16 +124,86 @@ async fn bluetooth_battery() -> Option<BatteryInfo> {
     protocol::parse_pmset_battery(&String::from_utf8_lossy(&output.stdout))
 }
 
-#[tauri::command]
-async fn get_battery_status() -> Result<BatteryInfo, String> {
+async fn read_device_status() -> DeviceStatus {
     if let Some(battery) = bluetooth_battery().await {
-        return Ok(battery);
+        return DeviceStatus {
+            battery: Some(battery),
+            ..Default::default()
+        };
     }
     run_hid(|api| {
-        let dev = AjazzMouseDevice::open_mouse(api).or_else(|_| AjazzMouseDevice::open_dock(api))?;
-        AjazzMouseDevice::get_battery(&dev)
+        if !AjazzMouseDevice::is_present(api)? {
+            return Ok(DeviceStatus {
+                error: Some("Receptor 2.4G no conectado.".into()),
+                ..Default::default()
+            });
+        }
+        let battery = AjazzMouseDevice::open_mouse(api)
+            .or_else(|_| AjazzMouseDevice::open_dock(api))
+            .and_then(|dev| AjazzMouseDevice::get_battery(&dev));
+        Ok(DeviceStatus {
+            receiver_connected: true,
+            error: battery.as_ref().err().cloned(),
+            battery: battery.ok(),
+        })
     })
     .await
+    .unwrap_or_else(|e| DeviceStatus {
+        error: Some(e),
+        ..Default::default()
+    })
+}
+
+fn tray_tooltip(status: &DeviceStatus) -> String {
+    match (&status.battery, status.receiver_connected) {
+        (Some(b), _) if b.source == "bluetooth" => format!("AJAZZ APEX: {}% (Bluetooth)", b.level),
+        (Some(b), _) => format!("AJAZZ APEX: {}% (2.4G)", b.level),
+        (None, true) => "AJAZZ APEX: el mouse no responde".into(),
+        (None, false) => "AJAZZ APEX: desconectado".into(),
+    }
+}
+
+/// Lee el estado, lo refleja en la barra de menús y lo emite al frontend (`device-status`).
+async fn publish_device_status(app: &AppHandle) -> DeviceStatus {
+    let status = read_device_status().await;
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let title = status.battery.as_ref().map(|b| format!("{}%", b.level));
+        let _ = tray.set_title(title.as_deref());
+        let _ = tray.set_tooltip(Some(tray_tooltip(&status)));
+    }
+    let _ = app.emit("device-status", &status);
+    status
+}
+
+#[tauri::command]
+async fn get_device_status(app: AppHandle) -> DeviceStatus {
+    publish_device_status(&app).await
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Abrir OpenAJAZZ", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(Image::from_bytes(include_bytes!("../icons/tray-template.png"))?)
+        .icon_as_template(true)
+        .tooltip("AJAZZ APEX")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .build(app)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -171,16 +239,39 @@ async fn set_lighting_settings(
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            build_tray(app)?;
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    publish_device_status(&handle).await;
+                    tokio::time::sleep(STATUS_POLL_INTERVAL).await;
+                }
+            });
+            Ok(())
+        })
+        // Cerrar la ventana la oculta: la app sigue en la barra de menús hasta "Salir".
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             sync_clock,
             verify_screen_hardware,
-            erase_flash_memory,
             upload_image_to_screen,
-            get_battery_status,
+            get_device_status,
             save_dpi_settings,
             set_lighting_settings
         ])
-        .run(tauri::generate_context!())
-        .expect("Error al iniciar aplicación OpenAJAZZ");
+        .build(tauri::generate_context!())
+        .expect("Error al iniciar aplicación OpenAJAZZ")
+        .run(|_app, _event| {
+            // En macOS, pulsar el icono del Dock con la ventana oculta la vuelve a mostrar.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = _event {
+                show_main_window(_app);
+            }
+        });
 }

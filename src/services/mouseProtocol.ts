@@ -30,6 +30,13 @@ export interface BatteryInfo {
   source: 'hid' | 'bluetooth';
 }
 
+export interface DeviceStatus {
+  battery: BatteryInfo | null;
+  /** El receptor 2.4G está enchufado (aunque el mouse no responda). */
+  receiver_connected: boolean;
+  error: string | null;
+}
+
 export interface ScreenHardwareInfo {
   verified: boolean;
   oledVersion?: string;
@@ -312,12 +319,20 @@ class MouseProtocolService {
     }
   }
 
-  async getBattery(): Promise<BatteryInfo> {
+  /** Fuerza una lectura inmediata; el backend además la publica en el evento `device-status`. */
+  async getDeviceStatus(): Promise<DeviceStatus> {
     if (!this.isTauri) {
       throw new Error('La lectura de batería requiere la app de escritorio.');
     }
     const { invoke } = await import('@tauri-apps/api/core');
-    return invoke<BatteryInfo>('get_battery_status');
+    return invoke<DeviceStatus>('get_device_status');
+  }
+
+  /** Suscribe a las lecturas periódicas que hace el backend (cada 30 s). */
+  async onDeviceStatus(handler: (status: DeviceStatus) => void): Promise<() => void> {
+    if (!this.isTauri) return () => {};
+    const { listen } = await import('@tauri-apps/api/event');
+    return listen<DeviceStatus>('device-status', (event) => handler(event.payload));
   }
 
   getScreenInfo(): ScreenHardwareInfo {

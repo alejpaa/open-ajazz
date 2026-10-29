@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import { mouseService, BatteryInfo, ScreenHardwareInfo } from './mouseProtocol';
+import { mouseService, BatteryInfo, DeviceStatus, ScreenHardwareInfo } from './mouseProtocol';
 
 const IMAGE_KEY = 'openajazz.screenImage';
 const MAX_ANIMATED_PREVIEW_BYTES = 1024 * 1024;
@@ -7,6 +7,7 @@ const MAX_ANIMATED_PREVIEW_BYTES = 1024 * 1024;
 interface DeviceState {
   battery: BatteryInfo | null;
   batteryError: string | null;
+  receiverConnected: boolean;
   screenImage: string | null;
   screenInfo: ScreenHardwareInfo;
 }
@@ -19,13 +20,23 @@ function loadImage(): string | null {
   }
 }
 
-let state: DeviceState = { battery: null, batteryError: null, screenImage: loadImage(), screenInfo: { verified: false } };
+let state: DeviceState = {
+  battery: null,
+  batteryError: null,
+  receiverConnected: false,
+  screenImage: loadImage(),
+  screenInfo: { verified: false },
+};
 const listeners = new Set<() => void>();
 let batteryInFlight = false;
 
 function update(patch: Partial<DeviceState>) {
   state = { ...state, ...patch };
   listeners.forEach((l) => l());
+}
+
+function applyStatus(status: DeviceStatus) {
+  update({ battery: status.battery, batteryError: status.error, receiverConnected: status.receiver_connected });
 }
 
 function subscribe(listener: () => void) {
@@ -84,13 +95,21 @@ export const deviceStore = {
     if (batteryInFlight) return;
     batteryInFlight = true;
     try {
-      const battery = await mouseService.getBattery();
-      update({ battery, batteryError: null });
+      applyStatus(await mouseService.getDeviceStatus());
     } catch (e: any) {
-      update({ battery: null, batteryError: e?.message || String(e) });
+      update({ battery: null, batteryError: e?.message || String(e), receiverConnected: false });
     } finally {
       batteryInFlight = false;
     }
+  },
+
+  /** Escucha las lecturas periódicas del backend y pide una inmediata. Devuelve la baja. */
+  watchDeviceStatus() {
+    const unlisten = mouseService.onDeviceStatus(applyStatus);
+    deviceStore.refreshBattery();
+    return () => {
+      unlisten.then((stop) => stop());
+    };
   },
 
   async rememberScreenImage(file: File) {
