@@ -111,4 +111,4 @@ npm run tauri dev
 
 ## 📖 Protocolo USB HID
 Para consultar la estructura de cada byte, opcodes y paquetes de reporte, consulta el documento técnico detallado:
-📄 **[PROTOCOL.md](file:///C:/Users/Alejandro/Desktop/code/openajazz/PROTOCOL.md)**.
+📄 **[PROTOCOL.md](PROTOCOL.md)**.

@@ -73,14 +73,14 @@ class LoggerService {
       .reverse()
       .join('\n');
 
-    return `### 🛠️ Reporte de Diagnóstico OpenAJAZZ
+    return `### Reporte de Diagnóstico OpenAJAZZ
 **Fecha:** ${new Date().toLocaleString()}
 **Entorno:** ${isTauri ? 'Tauri (App Nativa)' : 'Navegador Web (WebHID: ' + (isWebHID ? 'Disponible' : 'No disponible') + ')'}
 **Navegador / Plataforma:** \`${userAgent}\`
 
 ---
 
-#### 🔴 Detalle del Error:
+#### Detalle del Error:
 ${currentError ? `* **Título:** ${currentError.title || 'Error'}
 * **Mensaje:** ${currentError.message || currentError}
 * **Solución sugerida:** ${currentError.solution || 'N/A'}
@@ -91,7 +91,7 @@ ${currentError.technicalDetails || currentError}
 
 ---
 
-#### 📜 Registros Recientes de Comunicación USB (Logs):
+#### Registros Recientes de Comunicación USB (Logs):
 \`\`\`text
 ${logLines || 'No hay eventos registrados aún.'}
 \`\`\`

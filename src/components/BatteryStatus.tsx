@@ -1,144 +1,89 @@
-import React, { useState, useEffect } from 'react';
-import { Battery, BatteryCharging, Wifi, Cpu, RefreshCw, CheckCircle2 } from 'lucide-react';
+import { useState } from 'react';
+import { BatteryCharging, Battery, RefreshCw } from 'lucide-react';
+import { deviceStore, useDeviceStore } from '../services/deviceStore';
 
-export const BatteryStatus: React.FC = () => {
-  const [batteryLevel, setBatteryLevel] = useState<number>(85);
-  const [isCharging, setIsCharging] = useState<boolean>(true);
-  const [oledVersion] = useState<string>('v1.0.4');
-  const [flashVersion] = useState<string>('v2.1.0');
-  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+function levelColor(level: number) {
+  if (level > 50) return 'bg-ok-500';
+  if (level > 20) return 'bg-warn-500';
+  return 'bg-danger-500';
+}
 
-  const refreshStatus = async () => {
+export function BatteryStatus() {
+  const { battery, batteryError, screenInfo } = useDeviceStore();
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const refresh = async () => {
     setIsRefreshing(true);
-    try {
-      if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const res: any = await invoke('get_battery_status');
-        if (res) {
-          setBatteryLevel(res.level);
-          setIsCharging(res.is_charging);
-        }
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setTimeout(() => setIsRefreshing(false), 500);
-    }
+    await deviceStore.refreshBattery();
+    setIsRefreshing(false);
   };
 
-  useEffect(() => {
-    refreshStatus();
-    const interval = setInterval(refreshStatus, 15000);
-    return () => clearInterval(interval);
-  }, []);
+  const Icon = battery?.is_charging === true ? BatteryCharging : Battery;
 
   return (
     <div className="space-y-6">
-      <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-5 shadow-lg backdrop-blur flex justify-between items-center">
+      <header className="flex items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-white flex items-center gap-2">
-            <Battery className="w-6 h-6 text-indigo-400" />
-            Telemetría, Batería y Firmware
-          </h2>
-          <p className="text-sm text-slate-400 mt-1">
-            Monitoreo en tiempo real del estado de energía, base de carga magnética y versiones internas de hardware.
-          </p>
+          <h2 className="text-lg font-semibold text-white">Batería y estado</h2>
+          <p className="text-sm text-neutral-400 mt-1">Lectura en vivo del mouse y la base. Se actualiza cada 30 s.</p>
         </div>
         <button
-          onClick={refreshStatus}
+          onClick={refresh}
           disabled={isRefreshing}
-          className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-sm font-medium transition shadow-sm"
+          className="flex items-center gap-2 px-3.5 py-2 rounded-md text-sm bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-neutral-100 transition cursor-pointer"
         >
-          <RefreshCw className={`w-4 h-4 text-indigo-400 ${isRefreshing ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} aria-hidden />
           Actualizar
         </button>
-      </div>
+      </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Battery Card */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-6 flex flex-col justify-between space-y-4">
-          <div className="flex justify-between items-center">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Carga de Batería</span>
-            {isCharging ? (
-              <span className="flex items-center gap-1.5 text-xs text-amber-400 bg-amber-950/40 px-2 py-0.5 rounded-full border border-amber-800/40">
-                <BatteryCharging className="w-3.5 h-3.5" />
-                Cargando en Base
-              </span>
-            ) : (
-              <span className="text-xs text-slate-400">En Batería</span>
-            )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <section className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 space-y-4">
+          <h3 className="text-xs font-medium text-neutral-400 uppercase tracking-wide">Batería</h3>
+          <div className="flex items-center gap-3">
+            <Icon className="w-6 h-6 text-neutral-400" aria-hidden />
+            <span className="text-4xl font-semibold font-mono text-white">
+              {battery ? `${battery.level}%` : '--'}
+            </span>
           </div>
-
-          <div className="flex items-baseline gap-2">
-            <span className="text-5xl font-black text-white font-mono">{batteryLevel}%</span>
-            <span className="text-xs text-slate-500 font-medium">Capacidad</span>
-          </div>
-
-          <div className="w-full h-3 bg-slate-950 rounded-full overflow-hidden p-0.5 border border-slate-800">
+          <div className="w-full h-2 bg-neutral-800 rounded-full overflow-hidden">
             <div
-              className={`h-full rounded-full transition-all duration-500 ${
-                batteryLevel > 50
-                  ? 'bg-emerald-500'
-                  : batteryLevel > 20
-                  ? 'bg-amber-500'
-                  : 'bg-red-500'
-              }`}
-              style={{ width: `${batteryLevel}%` }}
+              className={`h-full rounded-full transition-all duration-500 ${battery ? levelColor(battery.level) : ''}`}
+              style={{ width: `${battery?.level ?? 0}%` }}
             />
           </div>
-        </div>
+          <p className="text-xs text-neutral-500">
+            {battery
+              ? `${battery.is_charging === true ? 'Cargando · ' : battery.is_charging === false ? 'Usando batería · ' : ''}${battery.source === 'bluetooth' ? 'vía Bluetooth (macOS)' : 'vía receptor 2.4G'}`
+              : batteryError ?? 'Conecta el dispositivo para leer la batería.'}
+          </p>
+          {!battery && (
+            <p className="text-xs text-neutral-600">
+              Enciende el mouse en modo 2.4G (receptor conectado) o en Bluetooth para leer la batería.
+            </p>
+          )}
+        </section>
 
-        {/* Connection Card */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-6 flex flex-col justify-between space-y-4">
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Conexión y Base</span>
-
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-xl bg-indigo-950/50 border border-indigo-800/40 flex items-center justify-center text-indigo-400">
-              <Wifi className="w-6 h-6" />
+        <section className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 space-y-4">
+          <h3 className="text-xs font-medium text-neutral-400 uppercase tracking-wide">Pantalla TFT</h3>
+          <dl className="space-y-2 text-sm">
+            <div className="flex justify-between">
+              <dt className="text-neutral-400">Controlador OLED</dt>
+              <dd className="font-mono text-neutral-200">{screenInfo.oledVersion || '--'}</dd>
             </div>
-            <div>
-              <div className="text-base font-bold text-white flex items-center gap-1.5">
-                <span>Inalámbrico 2.4 GHz</span>
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              </div>
-              <p className="text-xs text-slate-400 mt-0.5">Base Dongle APEX (`3151:5007`)</p>
+            <div className="flex justify-between">
+              <dt className="text-neutral-400">Memoria Flash</dt>
+              <dd className="font-mono text-neutral-200">{screenInfo.flashVersion || '--'}</dd>
             </div>
-          </div>
-
-          <div className="text-xs text-slate-500 flex justify-between border-t border-slate-800/80 pt-3">
-            <span>Estado de enlace:</span>
-            <span className="text-emerald-400 font-medium">Excelente (Sin interferencia)</span>
-          </div>
-        </div>
-
-        {/* Firmware Card */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-6 flex flex-col justify-between space-y-4">
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Microcontrolador y Pantalla</span>
-
-          <div className="space-y-2">
-            <div className="flex justify-between items-center text-xs">
-              <span className="text-slate-400 flex items-center gap-1.5">
-                <Cpu className="w-3.5 h-3.5 text-indigo-400" />
-                Chip TFT LCD:
-              </span>
-              <span className="font-mono text-slate-200">{oledVersion}</span>
+            <div className="flex justify-between">
+              <dt className="text-neutral-400">Estado</dt>
+              <dd className={screenInfo.verified ? 'text-ok-400' : 'text-neutral-500'}>
+                {screenInfo.verified ? 'Verificado' : 'Sin verificar'}
+              </dd>
             </div>
-            <div className="flex justify-between items-center text-xs">
-              <span className="text-slate-400">Memoria Flash SPI:</span>
-              <span className="font-mono text-slate-200">{flashVersion}</span>
-            </div>
-            <div className="flex justify-between items-center text-xs">
-              <span className="text-slate-400">Sensor Óptico:</span>
-              <span className="font-mono text-indigo-400">PixArt PAW3950</span>
-            </div>
-          </div>
-
-          <div className="text-xs text-slate-500 flex justify-between border-t border-slate-800/80 pt-3">
-            <span>Fabricante:</span>
-            <span className="text-slate-300">Yichip / AJAZZ</span>
-          </div>
-        </div>
+          </dl>
+        </section>
       </div>
     </div>
   );
-};
+}

@@ -20,7 +20,9 @@ pub const CMD_SETTFTLCDDATA: u8 = 0x25;   // 37
 pub const CMD_SET_OLEDCLOCK: u8 = 0x28;   // 40
 pub const CMD_MOUSE_SET_OPTIONPARAM0: u8 = 0x53; // 83
 pub const CMD_MOUSE_SET_OPTIONPARAM1: u8 = 0x54; // 84
-pub const CMD_GET_BATTERY: u8 = 0x83;    // 131
+#[allow(dead_code)]
+pub const CMD_GET_BATTERY: u8 = 0x83;    // 131 (sin respuesta en el receptor 2.4G 8K)
+pub const CMD_GET_STATUS: u8 = 0xF7;     // 247 - estado del mouse: batería en el byte 2
 pub const CMD_GETTFTLCDDATA: u8 = 0xA5;   // 165
 pub const CMD_SET_FLASHCHIPERASE: u8 = 0xAC; // 172
 pub const CMD_GETOLED_VERSION: u8 = 0xAD;    // 173
@@ -37,8 +39,11 @@ pub struct DpiStageConfig {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BatteryInfo {
     pub level: u8,
-    pub is_charging: bool,
+    /// `None` cuando la fuente no informa el estado de carga.
+    pub is_charging: Option<bool>,
     pub is_connected: bool,
+    /// Origen de la lectura: "hid" (comando 0x83) o "bluetooth" (reportada por macOS).
+    pub source: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -52,80 +57,94 @@ pub struct ScreenHardwareInfo {
 pub struct AjazzMouseDevice;
 
 impl AjazzMouseDevice {
-    /// Detecta si un dispositivo HID corresponde a la Base con Pantalla TFT (MI_02 / Usage 2)
-    pub fn is_dock(info: &hidapi::DeviceInfo) -> bool {
+    /// Interfaz propietaria del fabricante (UsagePage 0xFFFF). En macOS/Windows el
+    /// `usage_page` es fiable; en backends que no lo informan (0) se usa el número de interfaz.
+    fn is_vendor_interface(info: &hidapi::DeviceInfo) -> bool {
         if info.vendor_id() != VID_AJAZZ || info.product_id() != PID_AJAZZ_APEX {
             return false;
         }
-        if info.interface_number() == 2 || info.usage() == 2 {
-            return true;
+        match info.usage_page() {
+            0xFFFF => true,
+            0 => {
+                matches!(info.interface_number(), 1 | 2)
+                    || info.path().to_str().map_or(false, |p| {
+                        let p = p.to_lowercase();
+                        p.contains("mi_01") || p.contains("mi_02")
+                    })
+            }
+            _ => false,
         }
-        if let Ok(p) = info.path().to_str() {
-            let lower = p.to_lowercase();
-            if lower.contains("mi_02") || lower.contains("&col02") {
+    }
+
+    /// Indica si un descriptor HID declara algún reporte Feature (ítem principal 0xB1).
+    fn declares_feature_report(descriptor: &[u8]) -> bool {
+        let mut i = 0;
+        while i < descriptor.len() {
+            let prefix = descriptor[i];
+            if prefix == 0xFE {
+                // ítem largo: el siguiente byte es su tamaño de datos
+                i += 3 + descriptor.get(i + 1).copied().unwrap_or(0) as usize;
+                continue;
+            }
+            if prefix & 0xFC == 0xB0 {
                 return true;
             }
+            i += 1 + match prefix & 0x03 {
+                3 => 4,
+                n => n as usize,
+            };
         }
         false
     }
 
-    /// Detecta si un dispositivo HID corresponde al Mouse (MI_01 / Usage 1)
-    pub fn is_mouse(info: &hidapi::DeviceInfo) -> bool {
-        if info.vendor_id() != VID_AJAZZ || info.product_id() != PID_AJAZZ_APEX {
-            return false;
+    /// Abre la interfaz del fabricante por la que se envían los comandos (reportes Feature).
+    /// Se prefiere `preferred_usage`, pero solo se acepta una interfaz que realmente
+    /// declare reportes Feature: según el modelo, el canal de comandos puede ser Usage 1 o 2.
+    fn open_command_channel(api: &mut HidApi, preferred_usage: u16, what: &str) -> Result<HidDevice, String> {
+        api.refresh_devices()
+            .map_err(|e| format!("Error enumerando dispositivos HID: {}", e))?;
+        let mut candidates: Vec<&hidapi::DeviceInfo> = api
+            .device_list()
+            .filter(|info| Self::is_vendor_interface(info))
+            .collect();
+        if candidates.is_empty() {
+            return Err(format!("{} AJAZZ APEX (0x3151:0x5007) no encontrado.", what));
         }
-        if info.interface_number() == 1 || info.usage() == 1 {
-            return true;
-        }
-        if let Ok(p) = info.path().to_str() {
-            let lower = p.to_lowercase();
-            if lower.contains("mi_01") || lower.contains("&col01") || lower.contains("&col04") {
-                return true;
+        candidates.sort_by_key(|info| info.usage() != preferred_usage);
+
+        let mut last_error = None;
+        for info in candidates {
+            match info.open_device(api) {
+                Ok(dev) => {
+                    let mut descriptor = [0u8; 4096];
+                    let has_feature = dev
+                        .get_report_descriptor(&mut descriptor)
+                        .map(|n| Self::declares_feature_report(&descriptor[..n]))
+                        .unwrap_or(info.usage() == preferred_usage);
+                    if has_feature {
+                        return Ok(dev);
+                    }
+                }
+                Err(e) => last_error = Some(e.to_string()),
             }
         }
-        false
+        Err(match last_error {
+            Some(e) => format!(
+                "Error abriendo {}: {}. Cierra cualquier otro software que lo use.",
+                what, e
+            ),
+            None => format!("{}: ninguna interfaz acepta comandos.", what),
+        })
     }
 
     /// Abre la Base Magnética con Pantalla TFT
-    pub fn open_dock() -> Result<HidDevice, String> {
-        let api = HidApi::new().map_err(|e| format!("Error inicializando HID API: {}", e))?;
-        for info in api.device_list() {
-            if Self::is_dock(info) {
-                return info.open_device(&api).map_err(|e| {
-                    format!("Error abriendo Base con pantalla TFT: {}. Cierra cualquier otro software que la use.", e)
-                });
-            }
-        }
-        // Fallback: abrir cualquier dispositivo 3151:5007
-        for info in api.device_list() {
-            if info.vendor_id() == VID_AJAZZ && info.product_id() == PID_AJAZZ_APEX {
-                if let Ok(dev) = info.open_device(&api) {
-                    return Ok(dev);
-                }
-            }
-        }
-        Err("Base magnética con pantalla TFT (0x3151:0x5007) no encontrada.".into())
+    pub fn open_dock(api: &mut HidApi) -> Result<HidDevice, String> {
+        Self::open_command_channel(api, 2, "Base con pantalla TFT")
     }
 
     /// Abre el Mouse para configuración de DPI, luces y polling
-    pub fn open_mouse() -> Result<HidDevice, String> {
-        let api = HidApi::new().map_err(|e| format!("Error inicializando HID API: {}", e))?;
-        for info in api.device_list() {
-            if Self::is_mouse(info) {
-                return info.open_device(&api).map_err(|e| {
-                    format!("Error abriendo Mouse: {}. Cierra cualquier otro software que lo use.", e)
-                });
-            }
-        }
-        // Fallback: buscar cualquier 3151:5007
-        for info in api.device_list() {
-            if info.vendor_id() == VID_AJAZZ && info.product_id() == PID_AJAZZ_APEX {
-                if let Ok(dev) = info.open_device(&api) {
-                    return Ok(dev);
-                }
-            }
-        }
-        Err("Mouse AJAZZ APEX (0x3151:0x5007) no encontrado.".into())
+    pub fn open_mouse(api: &mut HidApi) -> Result<HidDevice, String> {
+        Self::open_command_channel(api, 1, "Mouse")
     }
 
     /// Calcula y aplica el checksum BIT7 oficial del firmware AJAZZ:
@@ -141,6 +160,9 @@ impl AjazzMouseDevice {
         let mut report = vec![0x00u8; 65];
         let len = payload.len().min(64);
         report[1..=len].copy_from_slice(&payload[..len]);
+        // El firmware ignora los comandos sin checksum en el byte 7 (complemento de la suma de 0..6).
+        let sum: u32 = report[1..8].iter().map(|&b| b as u32).sum();
+        report[8] = (255 - (sum & 255)) as u8;
 
         match device.send_feature_report(&report) {
             Ok(_) => Ok(()),
@@ -156,27 +178,20 @@ impl AjazzMouseDevice {
         }
     }
 
-    /// Lee un reporte Feature HID
+    /// Lee un reporte Feature HID. El canal de comandos usa reportes sin numerar (ID 0);
+    /// `report_id` solo se prueba como alternativa para interfaces numeradas.
     pub fn read_feature(device: &HidDevice, report_id: u8) -> Result<Vec<u8>, String> {
-        let mut report = vec![0x00u8; 65];
-        report[0] = report_id;
-        match device.get_feature_report(&mut report) {
-            Ok(n) => {
-                if n > 1 {
-                    Ok(report[1..n].to_vec())
-                } else {
-                    Ok(report.to_vec())
-                }
-            }
-            Err(_) => {
-                let mut report0 = vec![0x00u8; 65];
-                report0[0] = 0;
-                let n = device.get_feature_report(&mut report0).map_err(|e| {
-                    format!("Error leyendo reporte Feature HID: {}", e)
-                })?;
-                Ok(report0[1..n].to_vec())
+        let mut last_error = String::new();
+        for id in [0u8, report_id] {
+            let mut report = vec![0x00u8; 65];
+            report[0] = id;
+            match device.get_feature_report(&mut report) {
+                Ok(n) if n > 1 => return Ok(report[1..n].to_vec()),
+                Ok(_) => return Ok(report),
+                Err(e) => last_error = e.to_string(),
             }
         }
+        Err(format!("Error leyendo reporte Feature HID: {}", last_error))
     }
 
     /// Consulta y verifica en vivo el firmware del microcontrolador TFT (Opcode 0xAD)
@@ -207,10 +222,10 @@ impl AjazzMouseDevice {
         }
 
         Ok(ScreenHardwareInfo {
-            verified: true,
-            oled_version: "Detectado".into(),
-            flash_version: "Detectado".into(),
-            details: "Canal HID activo".into(),
+            verified: false,
+            oled_version: String::new(),
+            flash_version: String::new(),
+            details: "El dispositivo se abrió pero no respondió a la consulta de versión (0xAD).".into(),
         })
     }
 
@@ -295,7 +310,7 @@ impl AjazzMouseDevice {
                     &format!(
                         "Optimizando GIF de {} a {} fotogramas para memoria Flash...",
                         orig_count,
-                        (orig_count + step - 1) / step
+                        orig_count.div_ceil(step)
                     ),
                 );
                 raw_frames.into_iter().step_by(step).collect()
@@ -305,12 +320,9 @@ impl AjazzMouseDevice {
 
             for (idx, frame) in frames_to_process.iter().enumerate() {
                 let buffer = frame.buffer();
-                let resized = image::imageops::resize(
-                    buffer,
-                    128,
-                    128,
-                    image::imageops::FilterType::Triangle,
-                );
+                let resized = image::DynamicImage::ImageRgba8(buffer.clone())
+                    .resize_to_fill(128, 128, image::imageops::FilterType::Triangle)
+                    .to_rgba8();
 
                 let mut raw_bytes = Vec::with_capacity(128 * 128 * 2);
                 for x in 0..128 {
@@ -344,7 +356,7 @@ impl AjazzMouseDevice {
             let dynamic_img = image::load_from_memory(image_bytes)
                 .map_err(|e| format!("Error procesando formato de imagen: {}", e))?;
 
-            let resized = dynamic_img.resize_exact(128, 128, image::imageops::FilterType::Lanczos3);
+            let resized = dynamic_img.resize_to_fill(128, 128, image::imageops::FilterType::Lanczos3);
             let mut raw_bytes = Vec::with_capacity(128 * 128 * 2);
             for x in 0..128 {
                 for y in 0..128 {
@@ -367,7 +379,7 @@ impl AjazzMouseDevice {
         }
 
         let total_frames = processed_frames.len();
-        let frame_bytes_len = 128 * 128 * 2; // 32768 bytes
+        let frame_bytes_len: usize = 128 * 128 * 2; // 32768 bytes
 
         progress_cb(
             10,
@@ -395,31 +407,23 @@ impl AjazzMouseDevice {
         handshake[16] = ((frame_bytes_len >> 16) & 0xff) as u8;
         handshake[17] = ((frame_bytes_len >> 24) & 0xff) as u8;
 
-        let mut ack_ok = false;
-        for attempt in 0..10 {
+        // Algunos firmwares no devuelven ACK legible: tras 10 intentos se continúa igualmente.
+        for _ in 0..10 {
             let _ = Self::send_feature(device, &handshake);
             std::thread::sleep(std::time::Duration::from_millis(100));
 
             if let Ok(ack_resp) = Self::read_feature(device, CMD_GETTFTLCDDATA) {
                 if ack_resp.len() > 1 && (ack_resp[1] == 1 || ack_resp[0] == 1) {
-                    ack_ok = true;
                     break;
                 }
             }
-            if attempt == 9 {
-                ack_ok = true;
-            }
-        }
-
-        if !ack_ok {
-            return Err("El microcontrolador de la base TFT no respondió al handshake.".into());
         }
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // 2. Transmisión secuencial de cada fotograma
         let chunk_size = 56;
-        let chunks_per_frame = (frame_bytes_len + chunk_size - 1) / chunk_size; // 586 chunks
+        let chunks_per_frame = frame_bytes_len.div_ceil(chunk_size); // 586 chunks
         let total_all_chunks = total_frames * chunks_per_frame;
 
         for (frame_idx, frame_data) in processed_frames.iter().enumerate() {
@@ -504,27 +508,24 @@ impl AjazzMouseDevice {
     }
 
 
-    /// Consulta el nivel de batería y estado de carga
+    /// Consulta el nivel de batería con el comando de estado 0xF7: el porcentaje llega en el
+    /// byte 2 de la respuesta. El byte de carga no está descifrado, por eso no se informa.
     pub fn get_battery(device: &HidDevice) -> Result<BatteryInfo, String> {
         let mut buf = [0u8; 64];
-        buf[0] = CMD_GET_BATTERY; // 0x83
+        buf[0] = CMD_GET_STATUS;
         Self::send_feature(device, &buf)?;
 
-        std::thread::sleep(std::time::Duration::from_millis(15));
-        let resp = Self::read_feature(device, CMD_GET_BATTERY)?;
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let resp = Self::read_feature(device, 0)?;
 
-        if resp.len() >= 3 && resp[0] == CMD_GET_BATTERY {
-            Ok(BatteryInfo {
-                level: resp[2].min(100),
-                is_charging: resp[1] == 1,
+        match resp.get(2) {
+            Some(&level) if level <= 100 && resp.iter().any(|&b| b != 0) => Ok(BatteryInfo {
+                level,
+                is_charging: None,
                 is_connected: true,
-            })
-        } else {
-            Ok(BatteryInfo {
-                level: 80,
-                is_charging: false,
-                is_connected: true,
-            })
+                source: "hid".into(),
+            }),
+            _ => Err("El receptor no devolvió una lectura de batería válida. ¿El mouse está activo y en modo 2.4G?".into()),
         }
     }
 
@@ -625,5 +626,70 @@ fn hex_to_rgb(hex: &str) -> (u8, u8, u8) {
         (r, g, b)
     } else {
         (255, 255, 255)
+    }
+}
+
+/// Extrae la batería de un mouse AJAZZ de la salida de `pmset -g accps` (macOS).
+/// Los periféricos Bluetooth aparecen como `-<nombre> (id=N)\t<porcentaje>%; ...`.
+pub fn parse_pmset_battery(output: &str) -> Option<BatteryInfo> {
+    output.lines().find_map(|line| {
+        let line = line.trim().strip_prefix('-')?;
+        let (name, rest) = line.split_once(" (id=")?;
+        if !is_ajazz_name(name) {
+            return None;
+        }
+        let (_, after_tab) = rest.split_once('\t')?;
+        let (percent, status) = after_tab.split_once('%')?;
+        let level: u8 = percent.trim().parse().ok()?;
+        let status = status.to_lowercase();
+        let is_charging = if status.trim_matches(|c: char| c == ';' || c.is_whitespace()).is_empty() {
+            None
+        } else {
+            Some(
+                status.contains("charging")
+                    && !status.contains("discharging")
+                    && !status.contains("not charging"),
+            )
+        };
+        Some(BatteryInfo {
+            level: level.min(100),
+            is_charging,
+            is_connected: true,
+            source: "bluetooth".into(),
+        })
+    })
+}
+
+fn is_ajazz_name(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("ajazz") || n.starts_with("aj1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=7602275)\t80%; AC attached; not charging present: true\n -AJ159 APEX (id=25367447)\t24%; \n";
+
+    #[test]
+    fn reads_bluetooth_mouse_battery() {
+        let b = parse_pmset_battery(SAMPLE).expect("debe encontrar el mouse");
+        assert_eq!(b.level, 24);
+        assert_eq!(b.is_charging, None);
+        assert_eq!(b.source, "bluetooth");
+    }
+
+    #[test]
+    fn detects_charging_state() {
+        let out = " -AJ159 APEX (id=1)\t60%; charging; (no estimate)\n";
+        assert_eq!(parse_pmset_battery(out).unwrap().is_charging, Some(true));
+        let out = " -AJ159 APEX (id=1)\t60%; discharging; 3:00 remaining\n";
+        assert_eq!(parse_pmset_battery(out).unwrap().is_charging, Some(false));
+    }
+
+    #[test]
+    fn ignores_other_devices() {
+        let out = " -InternalBattery-0 (id=1)\t80%; charging\n -Redmi Buds 6 (id=2)\t50%; \n";
+        assert!(parse_pmset_battery(out).is_none());
     }
 }

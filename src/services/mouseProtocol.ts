@@ -11,7 +11,7 @@ export const CMD_SETTFTLCDDATA = 0x25;   // 37 - Bloques de imagen RGB565
 export const CMD_SET_OLEDCLOCK = 0x28;   // 40 - Reloj y fecha
 export const CMD_MOUSE_SET_OPTIONPARAM0 = 0x53; // 83 - Sensor, debounce, LOD, polling
 export const CMD_MOUSE_SET_OPTIONPARAM1 = 0x54; // 84 - Etapas DPI y colores
-export const CMD_GET_BATTERY = 0x83;    // 131 - Nivel de batería
+export const CMD_GET_BATTERY = 0x83;    // 131 - Sin respuesta en el receptor 2.4G 8K (la batería usa 0xF7)
 export const CMD_GETTFTLCDDATA = 0xA5;   // 165 - Handshake obligatorio para imagen TFT
 export const CMD_SET_FLASHCHIPERASE = 0xAC; // 172 - Borrado de memoria Flash
 export const CMD_GETOLED_VERSION = 0xAD; // 173 - Lectura y verificación de versión TFT/OLED
@@ -25,8 +25,9 @@ export interface DpiStageConfig {
 
 export interface BatteryInfo {
   level: number;
-  is_charging: boolean;
+  is_charging: boolean | null;
   is_connected: boolean;
+  source: 'hid' | 'bluetooth';
 }
 
 export interface ScreenHardwareInfo {
@@ -44,6 +45,7 @@ class MouseProtocolService {
   private mouseReportId: number = 0;
   private isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
   private screenInfo: ScreenHardwareInfo = { verified: false };
+  private tauriConnected = false;
 
   /**
    * Conecta con el mouse y la base de carga.
@@ -52,8 +54,10 @@ class MouseProtocolService {
    */
   async connect(forcePrompt: boolean = false): Promise<boolean> {
     if (this.isTauri) {
-      logger.info('Modo Tauri nativo activo.');
-      this.screenInfo = { verified: true, oledVersion: '1.0 (Tauri)', flashVersion: '1.0' };
+      const info = await this.verifyHardwareConnection();
+      if (!this.tauriConnected) {
+        throw new Error(info.details || 'No se encontró el dispositivo AJAZZ APEX.');
+      }
       return true;
     }
 
@@ -167,17 +171,24 @@ class MouseProtocolService {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         const info: any = await invoke('verify_screen_hardware');
+        this.tauriConnected = true;
         this.screenInfo = {
           verified: info.verified,
-          oledVersion: info.oled_version,
-          flashVersion: info.flash_version,
+          oledVersion: info.oled_version || undefined,
+          flashVersion: info.flash_version || undefined,
           details: info.details,
         };
-        logger.rx(`✓ Microcontrolador TFT verificado vía Rust! OLED: ${this.screenInfo.oledVersion}, Flash: ${this.screenInfo.flashVersion}`);
+        if (info.verified) {
+          logger.rx(`Chip TFT verificado. OLED: ${this.screenInfo.oledVersion}, Flash: ${this.screenInfo.flashVersion}`);
+        } else {
+          logger.warn(info.details);
+        }
         return this.screenInfo;
       } catch (e: any) {
-        logger.warn(`Error verificando pantalla vía Tauri Rust: ${e?.message || e}`);
-        this.screenInfo = { verified: false, details: e?.message || String(e) };
+        this.tauriConnected = false;
+        const details = typeof e === 'string' ? e : e?.message || String(e);
+        logger.warn(`No se pudo abrir el dispositivo: ${details}`);
+        this.screenInfo = { verified: false, details };
         return this.screenInfo;
       }
     }
@@ -301,12 +312,20 @@ class MouseProtocolService {
     }
   }
 
+  async getBattery(): Promise<BatteryInfo> {
+    if (!this.isTauri) {
+      throw new Error('La lectura de batería requiere la app de escritorio.');
+    }
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke<BatteryInfo>('get_battery_status');
+  }
+
   getScreenInfo(): ScreenHardwareInfo {
     return this.screenInfo;
   }
 
   isConnected(): boolean {
-    if (this.isTauri) return true;
+    if (this.isTauri) return this.tauriConnected;
     return !!(this.screenDevice?.opened || this.mouseDevice?.opened || this.hidDevice?.opened);
   }
 
@@ -398,7 +417,13 @@ class MouseProtocolService {
   /**
    * Configura las etapas de DPI y sus colores LED asociados
    */
-  async setDpi(activeStage: number, stages: DpiStageConfig[], pollingRate: number, debounceTime: number): Promise<void> {
+  async setDpi(activeStageId: number, allStages: DpiStageConfig[], pollingRate: number, debounceTime: number): Promise<void> {
+    const stages = allStages.filter((s) => s.enabled);
+    const activeIndex = stages.findIndex((s) => s.id === activeStageId);
+    if (stages.length === 0 || activeIndex < 0) {
+      throw new Error('Activa al menos una etapa y selecciona una etapa activa habilitada.');
+    }
+    const activeStage = activeIndex + 1;
     logger.tx(`Configurando DPI: etapa activa=${activeStage}, polling=${pollingRate}Hz, debounce=${debounceTime}ms`);
     if (this.isTauri) {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -406,7 +431,7 @@ class MouseProtocolService {
         activeStage,
         pollingRate,
         debounceTime,
-        stages: stages.filter(s => s.enabled)
+        stages
       });
       return;
     }
@@ -427,10 +452,9 @@ class MouseProtocolService {
     buf1[0] = CMD_MOUSE_SET_OPTIONPARAM1; // 0x54
     buf1[1] = 0;
     buf1[2] = Math.max(0, activeStage - 1);
-    const enabledStages = stages.filter(s => s.enabled);
-    buf1[3] = Math.min(8, enabledStages.length);
+    buf1[3] = Math.min(8, stages.length);
 
-    enabledStages.slice(0, 8).forEach((stage, i) => {
+    stages.slice(0, 8).forEach((stage, i) => {
       buf1[8 + i * 2] = stage.value & 0xff;
       buf1[9 + i * 2] = (stage.value >> 8) & 0xff;
 
